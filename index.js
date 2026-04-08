@@ -384,6 +384,10 @@ async function handleSelectZip(event, payload = {}) {
     hasZipPath: typeof payload.zipPath === 'string' && payload.zipPath.trim().length > 0,
   })
   if (activeImportRequest && activeImportRequest !== importId) {
+    console.warn('[ddp][main] import blocked by activeImportRequest', {
+      requestedImportId: importId,
+      activeImportRequest,
+    })
     emitImportStatus(event, {
       importId,
       activeImportId: activeImportRequest,
@@ -409,6 +413,7 @@ async function handleSelectZip(event, payload = {}) {
   }
 
   activeImportRequest = importId
+  console.debug('[ddp][main] activeImportRequest:set', { activeImportRequest })
   emitImportStatus(event, {
     importId,
     activeImportId: activeImportRequest,
@@ -726,6 +731,7 @@ async function handleSelectZip(event, payload = {}) {
     return errorResponse
   } finally {
     if (activeImportRequest === importId) {
+      console.debug('[ddp][main] activeImportRequest:clear', { activeImportRequest })
       activeImportRequest = null
     }
   }
