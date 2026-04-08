@@ -65,6 +65,17 @@
           <p id="importStatus" class="muted small">No package selected.</p>
           <div id="timeline" class="timeline"></div>
         </section>
+
+        <section class="card">
+          <div class="card-header-row">
+            <h2 class="card-title">Premium History</h2>
+            <div class="segmented-toggle" role="group" aria-label="Premium history view mode">
+              <button id="premiumModeText" class="toggle-button" type="button" data-mode="text">Text</button>
+              <button id="premiumModeGraph" class="toggle-button" type="button" data-mode="graph">Graph</button>
+            </div>
+          </div>
+          <div id="premiumHistory" class="premium-history"></div>
+        </section>
       </main>
     </div>
 
@@ -81,9 +92,14 @@
       const timelineEl = document.getElementById('timeline')
       const timelineTitleEl = document.getElementById('timelineTitle')
       const statusBadgeEl = document.getElementById('statusBadge')
+      const premiumHistoryEl = document.getElementById('premiumHistory')
+      const premiumModeTextEl = document.getElementById('premiumModeText')
+      const premiumModeGraphEl = document.getElementById('premiumModeGraph')
 
       const versions = window.ddpApi.getRuntimeVersions()
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
+
+      const PREMIUM_HISTORY_MODE_KEY = 'ddp:premium-history-mode'
 
       const state = {
         latestImportId: null,
@@ -92,6 +108,8 @@
         messagesByChannel: {},
         selectedChannelId: '',
         status: 'idle',
+        premiumHistory: [],
+        premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
       const timestampFormatter = new Intl.DateTimeFormat(undefined, {
@@ -172,6 +190,126 @@
 
           return matchesText && messageInDateRange(message, fromDate, toDate)
         })
+      }
+
+      function formatTimestampForDisplay(timestamp) {
+        if (!timestamp) {
+          return 'Present'
+        }
+
+        const epoch = Date.parse(timestamp)
+        if (Number.isNaN(epoch)) {
+          return timestamp
+        }
+
+        return timestampFormatter.format(new Date(epoch))
+      }
+
+      function formatDuration(startAt, endAt) {
+        const startEpoch = Date.parse(startAt)
+        const endEpoch = endAt ? Date.parse(endAt) : Date.now()
+
+        if (Number.isNaN(startEpoch) || Number.isNaN(endEpoch) || endEpoch < startEpoch) {
+          return 'Unknown duration'
+        }
+
+        const totalMs = endEpoch - startEpoch
+        const days = Math.floor(totalMs / (1000 * 60 * 60 * 24))
+        const hours = Math.floor((totalMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+
+        if (days > 0) {
+          return `${days}d ${hours}h`
+        }
+
+        const minutes = Math.floor((totalMs % (1000 * 60 * 60)) / (1000 * 60))
+        return `${hours}h ${minutes}m`
+      }
+
+      function setPremiumHistoryMode(mode) {
+        state.premiumHistoryMode = mode === 'graph' ? 'graph' : 'text'
+        localStorage.setItem(PREMIUM_HISTORY_MODE_KEY, state.premiumHistoryMode)
+      }
+
+      function renderPremiumHistoryText() {
+        if (state.premiumHistory.length === 0) {
+          premiumHistoryEl.innerHTML = '<div class="state">No premium history found in this export.</div>'
+          return
+        }
+
+        premiumHistoryEl.innerHTML = `<ul class="premium-interval-list">${state.premiumHistory
+          .map((interval) => {
+            const giftedLabel = interval.isGifted ? 'Gifted' : 'Direct'
+            const planLabel = interval.planType || 'unknown'
+            const startLabel = formatTimestampForDisplay(interval.startAt)
+            const endLabel = formatTimestampForDisplay(interval.endAt)
+            const durationLabel = formatDuration(interval.startAt, interval.endAt)
+
+            return `<li class="premium-interval-item">
+              <div class="premium-interval-title">${escapeHtml(startLabel)} → ${escapeHtml(endLabel)}</div>
+              <div class="muted small">Duration: ${escapeHtml(durationLabel)} • Plan: ${escapeHtml(planLabel)} • ${giftedLabel}</div>
+              <div class="muted small">Source: ${escapeHtml(interval.source || 'unknown')}</div>
+            </li>`
+          })
+          .join('')}</ul>`
+      }
+
+      function renderPremiumHistoryGraph() {
+        if (state.premiumHistory.length === 0) {
+          premiumHistoryEl.innerHTML = '<div class="state">No premium history found in this export.</div>'
+          return
+        }
+
+        const points = []
+        for (const interval of state.premiumHistory) {
+          const startEpoch = Date.parse(interval.startAt)
+          const endEpoch = interval.endAt ? Date.parse(interval.endAt) : Date.now()
+          if (Number.isNaN(startEpoch) || Number.isNaN(endEpoch) || endEpoch < startEpoch) {
+            continue
+          }
+
+          points.push({ ...interval, startEpoch, endEpoch })
+        }
+
+        if (points.length === 0) {
+          premiumHistoryEl.innerHTML = '<div class="state">Premium history exists but could not be graphed due to invalid dates.</div>'
+          return
+        }
+
+        const minStart = Math.min(...points.map((item) => item.startEpoch))
+        const maxEnd = Math.max(...points.map((item) => item.endEpoch))
+        const range = Math.max(1, maxEnd - minStart)
+
+        premiumHistoryEl.innerHTML = `
+          <div class="premium-graph-shell">
+            <div class="premium-graph-track">
+              ${points
+                .map((item) => {
+                  const left = ((item.startEpoch - minStart) / range) * 100
+                  const width = Math.max(0.8, ((item.endEpoch - item.startEpoch) / range) * 100)
+                  const title = `${formatTimestampForDisplay(item.startAt)} → ${formatTimestampForDisplay(item.endAt)} (${formatDuration(item.startAt, item.endAt)})`
+
+                  return `<div class="premium-graph-segment" style="left:${left}%;width:${width}%;" title="${escapeHtml(title)}"></div>`
+                })
+                .join('')}
+            </div>
+            <div class="premium-graph-axis muted small">
+              <span>${escapeHtml(formatTimestampForDisplay(new Date(minStart).toISOString()))}</span>
+              <span>${escapeHtml(formatTimestampForDisplay(new Date(maxEnd).toISOString()))}</span>
+            </div>
+          </div>
+        `
+      }
+
+      function renderPremiumHistory() {
+        premiumModeTextEl.classList.toggle('active', state.premiumHistoryMode === 'text')
+        premiumModeGraphEl.classList.toggle('active', state.premiumHistoryMode === 'graph')
+
+        if (state.premiumHistoryMode === 'graph') {
+          renderPremiumHistoryGraph()
+          return
+        }
+
+        renderPremiumHistoryText()
       }
 
       function renderChannelList() {
@@ -276,6 +414,7 @@
       function render() {
         renderChannelList()
         renderTimeline()
+        renderPremiumHistory()
 
         if (state.importMeta?.warnings?.length) {
           importStatusEl.textContent = state.importMeta.warnings.join(' | ')
@@ -315,6 +454,7 @@
           }
           state.channels = []
           state.messagesByChannel = {}
+          state.premiumHistory = []
           setStatus('error', 'Error')
           render()
           return
@@ -322,6 +462,7 @@
 
         state.channels = parserPage.channels || []
         state.messagesByChannel = parserPage.messagesByChannel || {}
+        state.premiumHistory = parserPage.premiumHistory || []
         if (!state.selectedChannelId && state.channels.length > 0) {
           state.selectedChannelId = state.channels[0].id
         }
@@ -337,6 +478,16 @@
         element.addEventListener('input', render)
         element.addEventListener('change', render)
       }
+
+      premiumModeTextEl.addEventListener('click', () => {
+        setPremiumHistoryMode('text')
+        renderPremiumHistory()
+      })
+
+      premiumModeGraphEl.addEventListener('click', () => {
+        setPremiumHistoryMode('graph')
+        renderPremiumHistory()
+      })
 
       channelListEl.addEventListener('click', (event) => {
         const button = event.target.closest('button[data-channel-id]')
