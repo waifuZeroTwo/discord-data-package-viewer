@@ -511,3 +511,43 @@ select {
   display: grid;
   gap: 8px;
 }
+
+.inline-warning-list {
+  margin: 8px 0 12px;
+}
+
+.inline-warning {
+  border: 1px solid color-mix(in oklab, var(--warning) 60%, var(--border));
+  background: color-mix(in oklab, var(--warning) 12%, transparent);
+  color: #fde68a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.data-details {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-elevated);
+}
+
+.data-details summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.data-details-body {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  font-size: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.data-details-body ul {
+  margin: 0;
+  padding-left: 16px;
+}
