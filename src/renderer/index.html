@@ -50,6 +50,23 @@
             <div id="progressDetails" class="small muted"></div>
             <div id="progressUpdatedAt" class="small muted"></div>
           </div>
+          <div id="stallPanel" class="stall-panel hidden">
+            <div class="stall-header">
+              <strong>Import appears stalled</strong>
+              <span id="stallSummary" class="small muted"></span>
+            </div>
+            <div class="stall-actions">
+              <button id="retryImportButton" class="button button-secondary" type="button">Retry current import</button>
+              <button id="forceCancelImportButton" class="button button-secondary" type="button">Cancel import</button>
+              <button id="openDebugDetailsButton" class="button button-secondary" type="button">Open debug details</button>
+            </div>
+            <details id="stallDebugDetails" class="data-details hidden">
+              <summary>Stall diagnostics</summary>
+              <div class="data-details-body">
+                <pre id="stallDebugPre" class="debug-pre"></pre>
+              </div>
+            </details>
+          </div>
           <div id="nonBlockingWarnings" class="inline-warning-list"></div>
           <div id="timeline" class="timeline"></div>
         </section>
@@ -135,6 +152,13 @@
       const progressBarFillEl = document.getElementById('progressBarFill')
       const progressDetailsEl = document.getElementById('progressDetails')
       const progressUpdatedAtEl = document.getElementById('progressUpdatedAt')
+      const stallPanelEl = document.getElementById('stallPanel')
+      const stallSummaryEl = document.getElementById('stallSummary')
+      const retryImportButton = document.getElementById('retryImportButton')
+      const forceCancelImportButton = document.getElementById('forceCancelImportButton')
+      const openDebugDetailsButton = document.getElementById('openDebugDetailsButton')
+      const stallDebugDetailsEl = document.getElementById('stallDebugDetails')
+      const stallDebugPreEl = document.getElementById('stallDebugPre')
       const premiumHistoryEl = document.getElementById('premiumHistory')
       const badgePanelEl = document.getElementById('badgePanel')
       const connectionsPanelEl = document.getElementById('connectionsPanel')
@@ -167,6 +191,7 @@
         [IMPORT_STATES.SCANNING_FILES]: 'Scanning files',
         [IMPORT_STATES.PARSING]: 'Parsing',
         [IMPORT_STATES.AGGREGATING]: 'Aggregating',
+        [IMPORT_STATES.STALLED]: 'Stalled',
         [IMPORT_STATES.COMPLETED]: 'Completed',
         [IMPORT_STATES.FAILED]: 'Failed',
         [IMPORT_STATES.CANCELED]: 'Canceled',
@@ -178,6 +203,7 @@
         [IMPORT_STATES.SCANNING_FILES]: 'Scanning extracted files for supported Discord sections...',
         [IMPORT_STATES.PARSING]: 'Parsing export files...',
         [IMPORT_STATES.AGGREGATING]: 'Aggregating analytics output...',
+        [IMPORT_STATES.STALLED]: 'Import appears stalled. Choose an action.',
         [IMPORT_STATES.COMPLETED]: 'Import finished successfully.',
         [IMPORT_STATES.FAILED]: 'Import failed.',
         [IMPORT_STATES.CANCELED]: 'Import canceled.',
@@ -211,6 +237,9 @@
           messageCount: 0,
         },
         parserProgress: null,
+        stallInfo: null,
+        stallDiagnostics: [],
+        selectedZipPath: null,
         isParsing: false,
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
         dashboardMetricMode: localStorage.getItem(DASHBOARD_METRIC_MODE_KEY) === 'characters' ? 'characters' : 'messages',
@@ -231,7 +260,7 @@
         statusBadgeEl.className = `status-badge status-${status}`
         statusBadgeEl.textContent = label
         const actionable =
-          [IMPORT_STATES.SELECTING_FILE, IMPORT_STATES.EXTRACTING_ZIP, IMPORT_STATES.SCANNING_FILES, IMPORT_STATES.PARSING, IMPORT_STATES.AGGREGATING].includes(state.importFlowState) &&
+          [IMPORT_STATES.SELECTING_FILE, IMPORT_STATES.EXTRACTING_ZIP, IMPORT_STATES.SCANNING_FILES, IMPORT_STATES.PARSING, IMPORT_STATES.AGGREGATING, IMPORT_STATES.STALLED].includes(state.importFlowState) &&
           Boolean(state.latestImportId)
         cancelImportButton.disabled = !actionable
         selectPackageButton.disabled = actionable
@@ -287,6 +316,27 @@
         progressUpdatedAtEl.textContent = Number.isNaN(updatedAtEpoch)
           ? ''
           : `Last updated: ${timestampFormatter.format(new Date(updatedAtEpoch))}${progress.heartbeat ? ' • heartbeat' : ''}`
+      }
+
+      function renderStallPanel() {
+        if (!state.stallInfo) {
+          stallPanelEl.classList.add('hidden')
+          stallDebugDetailsEl.classList.add('hidden')
+          return
+        }
+
+        stallPanelEl.classList.remove('hidden')
+        const elapsedMs = Number(state.stallInfo.elapsedMs || 0)
+        const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000))
+        stallSummaryEl.textContent = `${formatProgressPhase(state.stallInfo.phase)} • ${elapsedSec}s elapsed`
+        stallDebugPreEl.textContent = JSON.stringify(
+          {
+            stall: state.stallInfo,
+            diagnostics: state.stallDiagnostics,
+          },
+          null,
+          2,
+        )
       }
 
       function escapeHtml(value) {
@@ -1090,6 +1140,7 @@
         renderBilling()
         renderPremiumHistory()
         renderProgress()
+        renderStallPanel()
         renderPanelDataDetails(badgeDetailsEl, 'Badges', state.parserMetadata.badges)
         renderPanelDataDetails(connectionsDetailsEl, 'Connections', state.parserMetadata.connections)
         renderPanelDataDetails(emojiDetailsEl, 'Emojis', state.parserMetadata.emojis)
@@ -1205,6 +1256,9 @@
         state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         state.isParsing = true
         state.parserProgress = null
+        state.stallInfo = null
+        state.stallDiagnostics = []
+        stallDebugDetailsEl.open = false
         applyImportFlowState(IMPORT_STATES.SELECTING_FILE)
         renderTopRankings()
 
@@ -1218,6 +1272,7 @@
 
         state.latestImportId = importResult.importId || state.latestImportId
         state.importMeta = importResult
+        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
         state.parserMetadata = {}
 
         if (!importResult.ok) {
@@ -1261,6 +1316,69 @@
         await window.ddpApi.cancelParserJob({ importId: state.latestImportId })
       })
 
+      forceCancelImportButton.addEventListener('click', async () => {
+        if (!state.latestImportId) {
+          return
+        }
+        await window.ddpApi.cancelParserJob({ importId: state.latestImportId })
+      })
+
+      retryImportButton.addEventListener('click', async () => {
+        if (!state.selectedZipPath) {
+          importStatusEl.textContent = 'Cannot retry because the original ZIP path is unavailable.'
+          return
+        }
+
+        if (state.latestImportId) {
+          await window.ddpApi.cancelParserJob({ importId: state.latestImportId })
+        }
+
+        state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.isParsing = true
+        state.parserProgress = null
+        state.stallInfo = null
+        state.stallDiagnostics = []
+        stallDebugDetailsEl.open = false
+        applyImportFlowState(IMPORT_STATES.SELECTING_FILE, 'Retrying import with previously selected ZIP package.')
+        render()
+
+        const importResult = await window.ddpApi.selectZip({
+          importId: state.latestImportId,
+          zipPath: state.selectedZipPath,
+        })
+
+        if (!importResult) {
+          state.isParsing = false
+          applyImportFlowState(IMPORT_STATES.CANCELED)
+          return
+        }
+
+        state.latestImportId = importResult.importId || state.latestImportId
+        state.importMeta = importResult
+        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
+        if (!importResult.ok) {
+          state.isParsing = false
+          applyImportFlowState(importResult.canceled ? IMPORT_STATES.CANCELED : IMPORT_STATES.FAILED)
+          render()
+          return
+        }
+        state.isParsing = false
+        await loadParsedData()
+      })
+
+      openDebugDetailsButton.addEventListener('click', async () => {
+        if (!state.latestImportId) {
+          return
+        }
+        const diagnostics = await window.ddpApi.getImportDiagnostics({ importId: state.latestImportId })
+        if (diagnostics?.ok) {
+          state.stallDiagnostics = diagnostics.diagnostics || []
+        }
+        stallDebugDetailsEl.classList.remove('hidden')
+        stallDebugDetailsEl.open = true
+        renderStallPanel()
+      })
+
       window.ddpApi.onParserProgress((progress) => {
         if (!progress || progress.importId !== state.latestImportId || !progress.progress) {
           return
@@ -1284,8 +1402,17 @@
 
         const nextState = payload.state || IMPORT_STATES.IDLE
         const message = payload.message || IMPORT_STATUS_MESSAGES[nextState]
+        if (nextState === IMPORT_STATES.STALLED) {
+          state.stallInfo = payload.stall || {
+            phase: state.parserProgress?.phase || 'unknown',
+            elapsedMs: 0,
+          }
+        } else if ([IMPORT_STATES.COMPLETED, IMPORT_STATES.CANCELED, IMPORT_STATES.FAILED].includes(nextState)) {
+          state.stallInfo = null
+        }
         applyImportFlowState(nextState, message)
         state.isParsing = ![IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED].includes(nextState)
+        renderStallPanel()
       })
 
       render()
