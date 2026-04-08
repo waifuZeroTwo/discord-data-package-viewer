@@ -3,6 +3,7 @@ const { IMPORT_STATES } = require('./src/shared/importStates')
 
 contextBridge.exposeInMainWorld('ddpApi', {
   pickDataPackage: () => ipcRenderer.invoke('dialog:pick-data-package'),
+  selectImportSource: (options) => ipcRenderer.invoke('dialog:select-import-source', options),
   selectZip: (options) => ipcRenderer.invoke('dialog:select-zip', options),
   getParserAnalytics: (options) => ipcRenderer.invoke('parser:get-analytics', options),
   cancelParserJob: (options) => ipcRenderer.invoke('parser:cancel-job', options),

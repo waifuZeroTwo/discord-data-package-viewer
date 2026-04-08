@@ -14,6 +14,11 @@
     <header class="header">
       <h1 class="header-title">Discord Analytics Dashboard</h1>
       <div class="top-actions">
+        <label class="import-mode-label" for="importModeSelect">Mode</label>
+        <select id="importModeSelect" class="import-mode-select">
+          <option value="zip">Import ZIP</option>
+          <option value="folder">Import Extracted Folder</option>
+        </select>
         <button id="selectPackageButton" class="button" type="button">Import ZIP</button>
         <button id="cancelImportButton" class="button button-secondary" type="button" disabled>Cancel</button>
         <span id="statusBadge" class="status-badge status-idle">Idle</span>
@@ -140,6 +145,7 @@
       const versionsEl = document.getElementById('versions')
       const importStatusEl = document.getElementById('importStatus')
       const selectPackageButton = document.getElementById('selectPackageButton')
+      const importModeSelectEl = document.getElementById('importModeSelect')
       const cancelImportButton = document.getElementById('cancelImportButton')
       const channelListEl = document.getElementById('channelList')
       const timelineEl = document.getElementById('timeline')
@@ -198,7 +204,7 @@
       }
       const IMPORT_STATUS_MESSAGES = {
         [IMPORT_STATES.IDLE]: 'No package selected.',
-        [IMPORT_STATES.SELECTING_FILE]: 'Select a Discord ZIP export to continue.',
+        [IMPORT_STATES.SELECTING_FILE]: 'Select a Discord export source to continue.',
         [IMPORT_STATES.EXTRACTING_ZIP]: 'Extracting archive contents...',
         [IMPORT_STATES.SCANNING_FILES]: 'Scanning extracted files for supported Discord sections...',
         [IMPORT_STATES.PARSING]: 'Parsing export files...',
@@ -239,7 +245,8 @@
         parserProgress: null,
         stallInfo: null,
         stallDiagnostics: [],
-        selectedZipPath: null,
+        selectedSourcePath: null,
+        importSourceType: 'zip',
         isParsing: false,
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
         dashboardMetricMode: localStorage.getItem(DASHBOARD_METRIC_MODE_KEY) === 'characters' ? 'characters' : 'messages',
@@ -255,6 +262,23 @@
       })
       const localTimezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local time'
 
+      function getSelectedImportMode() {
+        return importModeSelectEl.value === 'folder' ? 'folder' : 'zip'
+      }
+
+      function getImportModeLabel(mode) {
+        return mode === 'folder' ? 'Extracted Folder' : 'ZIP'
+      }
+
+      function getSourceTypeFromMeta(meta) {
+        return meta?.importSourceType === 'folder' ? 'folder' : 'zip'
+      }
+
+      function updateImportButtonLabel() {
+        const mode = getSelectedImportMode()
+        selectPackageButton.textContent = mode === 'folder' ? 'Import Extracted Folder' : 'Import ZIP'
+      }
+
       function setStatus(status, label) {
         state.status = status
         statusBadgeEl.className = `status-badge status-${status}`
@@ -264,6 +288,7 @@
           Boolean(state.latestImportId)
         cancelImportButton.disabled = !actionable
         selectPackageButton.disabled = actionable
+        importModeSelectEl.disabled = actionable
       }
 
       function applyImportFlowState(nextState, message) {
@@ -331,6 +356,8 @@
         stallSummaryEl.textContent = `${formatProgressPhase(state.stallInfo.phase)} • ${elapsedSec}s elapsed`
         stallDebugPreEl.textContent = JSON.stringify(
           {
+            importSourceType: state.importSourceType,
+            sourcePath: state.selectedSourcePath,
             stall: state.stallInfo,
             diagnostics: state.stallDiagnostics,
           },
@@ -1229,6 +1256,8 @@
         element.addEventListener('change', renderBilling)
       }
 
+      importModeSelectEl.addEventListener('change', updateImportButtonLabel)
+
       premiumModeTextEl.addEventListener('click', () => {
         setPremiumHistoryMode('text')
         renderPremiumHistory()
@@ -1253,16 +1282,21 @@
           importStatusEl.textContent = 'An import is already running. Please wait for it to finish.'
           return
         }
+        const importSourceType = getSelectedImportMode()
         state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.importSourceType = importSourceType
         state.isParsing = true
         state.parserProgress = null
         state.stallInfo = null
         state.stallDiagnostics = []
         stallDebugDetailsEl.open = false
-        applyImportFlowState(IMPORT_STATES.SELECTING_FILE)
+        applyImportFlowState(
+          IMPORT_STATES.SELECTING_FILE,
+          `Choose a Discord export ${getImportModeLabel(importSourceType)} source.`,
+        )
         renderTopRankings()
 
-        const importResult = await window.ddpApi.selectZip({ importId: state.latestImportId })
+        const importResult = await window.ddpApi.selectImportSource({ importId: state.latestImportId, importSourceType })
 
         if (!importResult) {
           state.isParsing = false
@@ -1272,7 +1306,8 @@
 
         state.latestImportId = importResult.importId || state.latestImportId
         state.importMeta = importResult
-        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
+        state.importSourceType = getSourceTypeFromMeta(importResult)
+        state.selectedSourcePath = importResult.sourcePath || state.selectedSourcePath
         state.parserMetadata = {}
 
         if (!importResult.ok) {
@@ -1295,7 +1330,7 @@
             IMPORT_STATES.FAILED,
             invalidZip
               ? 'Invalid ZIP archive. Please choose a valid Discord export.'
-              : 'Import failed before completion.',
+              : `Import ${getImportModeLabel(state.importSourceType)} failed before completion.`,
           )
           render()
           return
@@ -1304,7 +1339,7 @@
         state.isParsing = false
         applyImportFlowState(
           IMPORT_STATES.COMPLETED,
-          `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
+          `Imported ${getImportModeLabel(state.importSourceType)} source (${state.selectedSourcePath || 'unknown path'}) with ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
         )
         await loadParsedData()
       })
@@ -1324,8 +1359,8 @@
       })
 
       retryImportButton.addEventListener('click', async () => {
-        if (!state.selectedZipPath) {
-          importStatusEl.textContent = 'Cannot retry because the original ZIP path is unavailable.'
+        if (!state.selectedSourcePath) {
+          importStatusEl.textContent = 'Cannot retry because the original import source path is unavailable.'
           return
         }
 
@@ -1339,12 +1374,16 @@
         state.stallInfo = null
         state.stallDiagnostics = []
         stallDebugDetailsEl.open = false
-        applyImportFlowState(IMPORT_STATES.SELECTING_FILE, 'Retrying import with previously selected ZIP package.')
+        applyImportFlowState(
+          IMPORT_STATES.SELECTING_FILE,
+          `Retrying import using ${getImportModeLabel(state.importSourceType)} source: ${state.selectedSourcePath}`,
+        )
         render()
 
-        const importResult = await window.ddpApi.selectZip({
+        const importResult = await window.ddpApi.selectImportSource({
           importId: state.latestImportId,
-          zipPath: state.selectedZipPath,
+          importSourceType: state.importSourceType,
+          sourcePath: state.selectedSourcePath,
         })
 
         if (!importResult) {
@@ -1355,7 +1394,8 @@
 
         state.latestImportId = importResult.importId || state.latestImportId
         state.importMeta = importResult
-        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
+        state.importSourceType = getSourceTypeFromMeta(importResult)
+        state.selectedSourcePath = importResult.sourcePath || state.selectedSourcePath
         if (!importResult.ok) {
           state.isParsing = false
           applyImportFlowState(importResult.canceled ? IMPORT_STATES.CANCELED : IMPORT_STATES.FAILED)
@@ -1388,7 +1428,11 @@
         state.isParsing = progress.progress.phase !== 'complete'
 
         if (progress.progress.message) {
-          importStatusEl.textContent = progress.progress.message
+          const sourcePath = state.selectedSourcePath || state.importMeta?.sourcePath
+          const sourceLabel = getImportModeLabel(state.importSourceType)
+          importStatusEl.textContent = sourcePath
+            ? `${progress.progress.message} • ${sourceLabel}: ${sourcePath}`
+            : progress.progress.message
         }
 
         renderTopRankings()
@@ -1401,7 +1445,12 @@
         }
 
         const nextState = payload.state || IMPORT_STATES.IDLE
-        const message = payload.message || IMPORT_STATUS_MESSAGES[nextState]
+        const sourcePath = payload.sourcePath || state.selectedSourcePath || state.importMeta?.sourcePath
+        const sourceType = payload.importSourceType || state.importSourceType
+        const baseMessage = payload.message || IMPORT_STATUS_MESSAGES[nextState]
+        const message = sourcePath
+          ? `${baseMessage} • ${getImportModeLabel(sourceType)}: ${sourcePath}`
+          : baseMessage
         if (nextState === IMPORT_STATES.STALLED) {
           state.stallInfo = payload.stall || {
             phase: state.parserProgress?.phase || 'unknown',
@@ -1411,10 +1460,13 @@
           state.stallInfo = null
         }
         applyImportFlowState(nextState, message)
+        state.importSourceType = payload.importSourceType || state.importSourceType
+        state.selectedSourcePath = payload.sourcePath || state.selectedSourcePath
         state.isParsing = ![IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED].includes(nextState)
         renderStallPanel()
       })
 
+      updateImportButtonLabel()
       render()
     </script>
   </body>
