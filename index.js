@@ -46,7 +46,7 @@ function createWindow() {
     height: 800,
     minWidth: 960,
     minHeight: 640,
-    title: 'Discord Data Package Viewer',
+    title: 'Discord Analytics Dashboard',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -187,11 +187,6 @@ async function handleSelectZip() {
   await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
   parsedArchiveCache.set(importId, parsedExport)
 
-  const messageCount = Object.values(parsedExport.messagesByChannel).reduce(
-    (count, messages) => count + messages.length,
-    0,
-  )
-
   return {
     ok: true,
     importId,
@@ -200,8 +195,8 @@ async function handleSelectZip() {
     detectedSections,
     missingSections,
     parserSummary: {
-      channelCount: parsedExport.channels.length,
-      messageCount,
+      channelCount: parsedExport.analyticsSummary.channelCount,
+      messageCount: parsedExport.analyticsSummary.messageCount,
       sortDirection: parsedExport.sortDirection,
     },
   }
@@ -227,7 +222,7 @@ async function appendParserDebugLog(importId, warningMessages) {
   }
 }
 
-async function handleGetParserPage(_event, payload = {}) {
+async function handleGetParserAnalytics(_event, payload = {}) {
   const importId = payload.importId
   const parsedExport = getCachedParse(importId)
 
@@ -235,54 +230,22 @@ async function handleGetParserPage(_event, payload = {}) {
     return {
       ok: false,
       warnings: [
-        `No parsed archive found for import ${importId}. Re-import the package before requesting parser pages.`,
+        `No parsed archive found for import ${importId}. Re-import the package before requesting analytics.`,
       ],
-      channels: [],
-      messagesByChannel: {},
     }
   }
-
-  if (payload.sortDirection && payload.sortDirection !== parsedExport.sortDirection) {
-    const sortedExport = {
-      ...parsedExport,
-      messagesByChannel: { ...parsedExport.messagesByChannel },
-      sortDirection: payload.sortDirection === 'desc' ? 'desc' : 'asc',
-    }
-
-    for (const [channelId, messages] of Object.entries(sortedExport.messagesByChannel)) {
-      sortedExport.messagesByChannel[channelId] = [...messages].sort((a, b) => {
-        const aEpoch = Number.isNaN(a.timestampEpochMs) ? Number.MAX_SAFE_INTEGER : a.timestampEpochMs
-        const bEpoch = Number.isNaN(b.timestampEpochMs) ? Number.MAX_SAFE_INTEGER : b.timestampEpochMs
-
-        if (aEpoch === bEpoch) {
-          return 0
-        }
-
-        if (sortedExport.sortDirection === 'desc') {
-          return aEpoch < bEpoch ? 1 : -1
-        }
-
-        return aEpoch > bEpoch ? 1 : -1
-      })
-    }
-
-    parsedArchiveCache.set(importId, sortedExport)
-  }
-
-  const currentParse = getCachedParse(importId)
 
   return {
     ok: true,
     importId,
-    sortDirection: currentParse.sortDirection,
-    ...getPaginatedParserOutput(currentParse, payload),
+    ...getPaginatedParserOutput(parsedExport, payload),
   }
 }
 
 app.whenReady().then(() => {
   ipcMain.handle('dialog:pick-data-package', handleSelectZip)
   ipcMain.handle('dialog:select-zip', handleSelectZip)
-  ipcMain.handle('parser:get-page', handleGetParserPage)
+  ipcMain.handle('parser:get-analytics', handleGetParserAnalytics)
 
   createWindow()
 
