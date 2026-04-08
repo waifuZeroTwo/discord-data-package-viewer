@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('ddpApi', {
   selectZip: (options) => ipcRenderer.invoke('dialog:select-zip', options),
   getParserAnalytics: (options) => ipcRenderer.invoke('parser:get-analytics', options),
   cancelParserJob: (options) => ipcRenderer.invoke('parser:cancel-job', options),
+  getImportDiagnostics: (options) => ipcRenderer.invoke('import:get-diagnostics', options),
   onParserProgress: (callback) => {
     const listener = (_event, payload) => {
       callback(payload)

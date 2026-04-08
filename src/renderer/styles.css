@@ -100,6 +100,7 @@ body {
 .status-scanning_files { color: var(--warning); }
 .status-parsing { color: var(--warning); }
 .status-aggregating { color: var(--warning); }
+.status-stalled { color: var(--warning); }
 .status-completed { color: var(--success); }
 .status-failed { color: var(--error); }
 .status-canceled { color: var(--muted); }
@@ -714,6 +715,35 @@ select {
   height: 100%;
   background: linear-gradient(90deg, #7c8cf8, #48b2ff);
   transition: width 160ms linear;
+}
+
+.stall-panel {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--warning) 60%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--warning) 10%, var(--surface-elevated));
+  display: grid;
+  gap: 8px;
+}
+
+.stall-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.stall-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.debug-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .inline-warning {

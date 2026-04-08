@@ -16,6 +16,13 @@ const IMPORT_RETENTION_MS = 1000 * 60 * 60 * 24 * 7
 const IMPORT_MAX_COUNT = 10
 const PARSER_DEBUG_LOG = 'parser-debug.log'
 const ANALYTICS_CACHE_SUBDIR = 'analytics-cache'
+const DEFAULT_PHASE_TIMEOUTS_MS = Object.freeze({
+  extracting: 1000 * 60 * 5,
+  scanning: 1000 * 60,
+  parsing: 1000 * 60 * 10,
+  aggregating: 1000 * 60 * 2,
+})
+const DEFAULT_STALL_THRESHOLD_MS = 1000 * 15
 const parsedArchiveCache = new Map()
 const activeParserJobs = new Map()
 let activeImportRequest = null
@@ -173,6 +180,110 @@ function emitParserProgress(event, meta, payload) {
   })
 }
 
+function nowIso() {
+  return new Date().toISOString()
+}
+
+function createImportRuntime(importId, importHash, options = {}) {
+  const phaseTimeoutsMs = { ...DEFAULT_PHASE_TIMEOUTS_MS, ...(options.phaseTimeoutsMs || {}) }
+  const stallThresholdMs = Number.isFinite(options.stallThresholdMs)
+    ? Math.max(1000, options.stallThresholdMs)
+    : DEFAULT_STALL_THRESHOLD_MS
+
+  return {
+    importId,
+    importHash,
+    selectedZipPath: options.selectedZipPath || null,
+    phaseTimeoutsMs,
+    stallThresholdMs,
+    currentPhase: 'selecting',
+    phaseStartedAtMs: Date.now(),
+    lastProgressAtMs: Date.now(),
+    stalledAtMs: null,
+    stallCount: 0,
+    canceled: false,
+    diagnostics: [],
+    monitorInterval: null,
+    parseAbortController: null,
+  }
+}
+
+function recordDiagnostic(runtime, entry) {
+  runtime.diagnostics.push({
+    recordedAt: nowIso(),
+    ...entry,
+  })
+  if (runtime.diagnostics.length > 30) {
+    runtime.diagnostics.shift()
+  }
+}
+
+function startRuntimeMonitor(event, runtime) {
+  stopRuntimeMonitor(runtime)
+  runtime.monitorInterval = setInterval(() => {
+    const phase = runtime.currentPhase
+    if (!phase || phase === 'complete') {
+      return
+    }
+
+    const phaseTimeoutMs = runtime.phaseTimeoutsMs[phase] ?? DEFAULT_PHASE_TIMEOUTS_MS.parsing
+    const elapsedMs = Date.now() - runtime.phaseStartedAtMs
+    const silentForMs = Date.now() - runtime.lastProgressAtMs
+    const isStalled = silentForMs >= runtime.stallThresholdMs || elapsedMs >= phaseTimeoutMs
+
+    if (!isStalled || runtime.stalledAtMs) {
+      return
+    }
+
+    runtime.stalledAtMs = Date.now()
+    runtime.stallCount += 1
+    const diagnostic = {
+      type: 'stall',
+      phase,
+      elapsedMs,
+      silentForMs,
+      thresholdMs: runtime.stallThresholdMs,
+      maxDurationMs: phaseTimeoutMs,
+      importId: runtime.importId,
+    }
+    recordDiagnostic(runtime, diagnostic)
+
+    emitImportStatus(event, {
+      importId: runtime.importId,
+      state: IMPORT_STATES.STALLED,
+      message: `Import appears stalled during ${phase} after ${Math.round(elapsedMs / 1000)}s.`,
+      stall: diagnostic,
+    })
+  }, 1000)
+}
+
+function stopRuntimeMonitor(runtime) {
+  if (runtime?.monitorInterval) {
+    clearInterval(runtime.monitorInterval)
+    runtime.monitorInterval = null
+  }
+}
+
+function setRuntimePhase(runtime, phase) {
+  runtime.currentPhase = phase
+  runtime.phaseStartedAtMs = Date.now()
+  runtime.lastProgressAtMs = Date.now()
+  runtime.stalledAtMs = null
+}
+
+function markRuntimeProgress(runtime) {
+  runtime.lastProgressAtMs = Date.now()
+  runtime.stalledAtMs = null
+}
+
+function throwIfImportCanceled(runtime) {
+  if (runtime?.canceled) {
+    const error = new Error('Import canceled by user.')
+    error.name = 'AbortError'
+    throw error
+  }
+}
+
 async function countZipFileEntries(zipPath) {
   return new Promise((resolve, reject) => {
     yauzl.open(zipPath, { lazyEntries: true }, (openError, zipFile) => {
@@ -252,26 +363,28 @@ async function handleSelectZip(event, payload = {}) {
   })
 
   try {
-    const { canceled, filePaths } = await dialog.showOpenDialog({
-      title: 'Select Discord Data Package',
-      properties: ['openFile'],
-      filters: [
-        { name: 'ZIP archive', extensions: ['zip'] },
-        { name: 'All files', extensions: ['*'] },
-      ],
-    })
-
-    if (canceled || filePaths.length === 0) {
-      emitImportStatus(event, {
-        importId,
-        state: IMPORT_STATES.CANCELED,
-        message: 'Import canceled before file selection.',
+    let selectedZipPath = typeof payload.zipPath === 'string' && payload.zipPath.trim() ? payload.zipPath : null
+    if (!selectedZipPath) {
+      const { canceled, filePaths } = await dialog.showOpenDialog({
+        title: 'Select Discord Data Package',
+        properties: ['openFile'],
+        filters: [
+          { name: 'ZIP archive', extensions: ['zip'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
       })
-      return null
+      if (canceled || filePaths.length === 0) {
+        emitImportStatus(event, {
+          importId,
+          state: IMPORT_STATES.CANCELED,
+          message: 'Import canceled before file selection.',
+        })
+        return null
+      }
+      selectedZipPath = filePaths[0]
     }
 
     const warnings = []
-    const selectedZipPath = filePaths[0]
     const importsRoot = path.join(app.getPath('userData'), IMPORTS_SUBDIR)
     const analyticsCacheRoot = path.join(app.getPath('userData'), ANALYTICS_CACHE_SUBDIR)
 
@@ -280,149 +393,182 @@ async function handleSelectZip(event, payload = {}) {
 
     const rootPath = path.join(importsRoot, importId)
     const importHash = await computeFileSha256(selectedZipPath)
-    const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
-
-    await fs.mkdir(rootPath, { recursive: true })
-
-    emitImportStatus(event, {
-      importId,
-      state: IMPORT_STATES.EXTRACTING_ZIP,
-      message: 'Extracting ZIP archive.',
+    const runtime = createImportRuntime(importId, importHash, {
+      selectedZipPath,
+      phaseTimeoutsMs: payload.phaseTimeoutsMs,
+      stallThresholdMs: payload.stallThresholdMs,
     })
-    emitParserProgress(event, { importId, importHash }, {
-      phase: 'extracting',
-      percent: 0,
-      filesDone: 0,
-      message: 'Starting ZIP extraction.',
-    })
-    await extractZipWithProgress(selectedZipPath, rootPath, (progress) => {
-      emitParserProgress(event, { importId, importHash }, progress)
-    })
+    activeParserJobs.set(importId, runtime)
+    startRuntimeMonitor(event, runtime)
 
-    emitImportStatus(event, {
-      importId,
-      state: IMPORT_STATES.SCANNING_FILES,
-      message: 'Scanning extracted files for Discord sections.',
-    })
-    const detectedSections = await detectSections(rootPath)
-    const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
-    const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
+    try {
+      const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
+      await fs.mkdir(rootPath, { recursive: true })
 
-    if (detectedSections.length === 0) {
-      warnings.push(
-        'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
-      )
-    } else if (missingSections.length > 0) {
-      warnings.push(
-        `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
-      )
-    }
-
-    let parsedExport
-    if (cachedAnalytics) {
+      setRuntimePhase(runtime, 'extracting')
       emitImportStatus(event, {
         importId,
-        state: IMPORT_STATES.AGGREGATING,
-        message: 'Using cached analytics.',
+        state: IMPORT_STATES.EXTRACTING_ZIP,
+        message: 'Extracting ZIP archive.',
       })
-      parsedExport = cachedAnalytics
       emitParserProgress(event, { importId, importHash }, {
-        phase: 'complete',
-        percent: 100,
-        recordsDone: parsedExport.analyticsSummary?.messageCount ?? 0,
-        message: 'Cache hit: loaded analytics from previous import.',
+        phase: 'extracting',
+        percent: 0,
+        filesDone: 0,
+        message: 'Starting ZIP extraction.',
       })
-    } else {
+      markRuntimeProgress(runtime)
+      await extractZipWithProgress(selectedZipPath, rootPath, (progress) => {
+        markRuntimeProgress(runtime)
+        emitParserProgress(event, { importId, importHash }, progress)
+      })
+      throwIfImportCanceled(runtime)
+
+      setRuntimePhase(runtime, 'scanning')
       emitImportStatus(event, {
         importId,
-        state: IMPORT_STATES.PARSING,
-        message: 'Parsing Discord export files.',
+        state: IMPORT_STATES.SCANNING_FILES,
+        message: 'Scanning extracted files for Discord sections.',
       })
-      const parseAbortController = new AbortController()
-      activeParserJobs.set(importId, { abortController: parseAbortController })
-      let latestProgress = null
-      let heartbeatInterval = null
-      try {
-        heartbeatInterval = setInterval(() => {
-          if (!latestProgress) {
-            return
-          }
+      emitParserProgress(event, { importId, importHash }, {
+        phase: 'scanning',
+        message: 'Scanning extracted files for known sections.',
+      })
+      markRuntimeProgress(runtime)
+      const detectedSections = await detectSections(rootPath)
+      throwIfImportCanceled(runtime)
+      const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
+      const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
 
-          emitParserProgress(event, { importId, importHash }, {
-            ...latestProgress,
-            heartbeat: true,
-            message: `${latestProgress.message} (still working)`,
-          })
-        }, 1500)
+      if (detectedSections.length === 0) {
+        warnings.push(
+          'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
+        )
+      } else if (missingSections.length > 0) {
+        warnings.push(
+          `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
+        )
+      }
 
-        parsedExport = await parseDiscordExport(rootPath, {
-          sortDirection: 'asc',
-          signal: parseAbortController.signal,
-          onProgress: (progress) => {
-            latestProgress = progress
-            emitParserProgress(event, { importId, importHash }, progress)
-          },
-        })
+      let parsedExport
+      if (cachedAnalytics) {
+        setRuntimePhase(runtime, 'aggregating')
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.AGGREGATING,
-          message: 'Aggregating analytics output.',
+          message: 'Using cached analytics.',
         })
-        await persistAnalyticsCache(analyticsCacheRoot, importHash, parsedExport)
-      } catch (error) {
-        if (error?.name === 'AbortError') {
-          await fs.rm(rootPath, { recursive: true, force: true })
+        parsedExport = cachedAnalytics
+        markRuntimeProgress(runtime)
+        emitParserProgress(event, { importId, importHash }, {
+          phase: 'complete',
+          percent: 100,
+          recordsDone: parsedExport.analyticsSummary?.messageCount ?? 0,
+          message: 'Cache hit: loaded analytics from previous import.',
+        })
+      } else {
+        setRuntimePhase(runtime, 'parsing')
+        emitImportStatus(event, {
+          importId,
+          state: IMPORT_STATES.PARSING,
+          message: 'Parsing Discord export files.',
+        })
+        const parseAbortController = new AbortController()
+        runtime.parseAbortController = parseAbortController
+        let latestProgress = null
+        let heartbeatInterval = null
+        try {
+          heartbeatInterval = setInterval(() => {
+            if (!latestProgress) {
+              return
+            }
+
+            markRuntimeProgress(runtime)
+            emitParserProgress(event, { importId, importHash }, {
+              ...latestProgress,
+              heartbeat: true,
+              message: `${latestProgress.message} (still working)`,
+            })
+          }, 1500)
+
+          parsedExport = await parseDiscordExport(rootPath, {
+            sortDirection: 'asc',
+            signal: parseAbortController.signal,
+            onProgress: (progress) => {
+              latestProgress = progress
+              markRuntimeProgress(runtime)
+              emitParserProgress(event, { importId, importHash }, progress)
+            },
+          })
+          throwIfImportCanceled(runtime)
+          setRuntimePhase(runtime, 'aggregating')
           emitImportStatus(event, {
             importId,
-            state: IMPORT_STATES.CANCELED,
-            message: 'Import canceled by user.',
+            state: IMPORT_STATES.AGGREGATING,
+            message: 'Aggregating analytics output.',
           })
-          return {
-            ok: false,
-            canceled: true,
-            importId,
-            importHash,
-            rootPath,
-            warnings: ['Import cancelled before analytics indexing finished.'],
-            detectedSections: [],
-            parserSummary: {
-              channelCount: 0,
-              messageCount: 0,
-            },
+          markRuntimeProgress(runtime)
+          await persistAnalyticsCache(analyticsCacheRoot, importHash, parsedExport)
+        } finally {
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval)
           }
         }
-
-        throw error
-      } finally {
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval)
-        }
-        activeParserJobs.delete(importId)
       }
-    }
 
-    await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
-    parsedArchiveCache.set(importId, parsedExport)
+      await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
+      parsedArchiveCache.set(importId, parsedExport)
+      setRuntimePhase(runtime, 'complete')
 
-    emitImportStatus(event, {
-      importId,
-      state: IMPORT_STATES.COMPLETED,
-      message: 'Import completed successfully.',
-    })
-    return {
-      ok: true,
-      importId,
-      importHash,
-      cacheHit: Boolean(cachedAnalytics),
-      rootPath,
-      warnings: [...warnings, ...parsedExport.warnings],
-      detectedSections,
-      missingSections,
-      parserSummary: {
-        channelCount: parsedExport.analyticsSummary.channelCount,
-        messageCount: parsedExport.analyticsSummary.messageCount,
-        sortDirection: parsedExport.sortDirection,
-      },
+      emitImportStatus(event, {
+        importId,
+        state: IMPORT_STATES.COMPLETED,
+        message: 'Import completed successfully.',
+      })
+      return {
+        ok: true,
+        importId,
+        importHash,
+        cacheHit: Boolean(cachedAnalytics),
+        rootPath,
+        selectedZipPath,
+        warnings: [...warnings, ...parsedExport.warnings],
+        detectedSections,
+        missingSections,
+        parserSummary: {
+          channelCount: parsedExport.analyticsSummary.channelCount,
+          messageCount: parsedExport.analyticsSummary.messageCount,
+          sortDirection: parsedExport.sortDirection,
+        },
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        await fs.rm(rootPath, { recursive: true, force: true })
+        emitImportStatus(event, {
+          importId,
+          state: IMPORT_STATES.CANCELED,
+          message: 'Import canceled by user.',
+        })
+        return {
+          ok: false,
+          canceled: true,
+          importId,
+          importHash,
+          rootPath,
+          selectedZipPath,
+          stallDiagnostics: activeParserJobs.get(importId)?.diagnostics || [],
+          warnings: ['Import cancelled before analytics indexing finished.'],
+          detectedSections: [],
+          parserSummary: {
+            channelCount: 0,
+            messageCount: 0,
+          },
+        }
+      }
+      throw error
+    } finally {
+      stopRuntimeMonitor(activeParserJobs.get(importId))
+      activeParserJobs.delete(importId)
     }
   } catch (error) {
     emitImportStatus(event, {
@@ -523,8 +669,34 @@ function handleCancelParserJob(_event, payload = {}) {
     return { ok: false, canceled: false }
   }
 
-  activeParserJobs.get(importId).abortController.abort()
-  return { ok: true, canceled: true }
+  const runtime = activeParserJobs.get(importId)
+  runtime.canceled = true
+  runtime.parseAbortController?.abort()
+  recordDiagnostic(runtime, {
+    type: 'cancel-requested',
+    phase: runtime.currentPhase,
+    elapsedMs: Date.now() - runtime.phaseStartedAtMs,
+  })
+  return { ok: true, canceled: true, phase: runtime.currentPhase }
+}
+
+function handleGetImportDiagnostics(_event, payload = {}) {
+  const importId = payload.importId
+  if (!importId || !activeParserJobs.has(importId)) {
+    return { ok: false, diagnostics: [] }
+  }
+
+  const runtime = activeParserJobs.get(importId)
+  return {
+    ok: true,
+    importId,
+    phase: runtime.currentPhase,
+    elapsedMs: Date.now() - runtime.phaseStartedAtMs,
+    stallCount: runtime.stallCount,
+    diagnostics: runtime.diagnostics,
+    phaseTimeoutsMs: runtime.phaseTimeoutsMs,
+    stallThresholdMs: runtime.stallThresholdMs,
+  }
 }
 
 app.whenReady().then(() => {
@@ -532,6 +704,7 @@ app.whenReady().then(() => {
   ipcMain.handle('dialog:select-zip', handleSelectZip)
   ipcMain.handle('parser:get-analytics', handleGetParserAnalytics)
   ipcMain.handle('parser:cancel-job', handleCancelParserJob)
+  ipcMain.handle('import:get-diagnostics', handleGetImportDiagnostics)
 
   createWindow()
 

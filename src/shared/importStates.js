@@ -5,6 +5,7 @@ const IMPORT_STATES = Object.freeze({
   SCANNING_FILES: 'scanning_files',
   PARSING: 'parsing',
   AGGREGATING: 'aggregating',
+  STALLED: 'stalled',
   COMPLETED: 'completed',
   FAILED: 'failed',
   CANCELED: 'canceled',
