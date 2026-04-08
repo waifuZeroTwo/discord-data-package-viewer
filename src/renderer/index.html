@@ -72,6 +72,16 @@
         </section>
 
         <section class="card">
+          <h2 class="card-title">Recent Emojis</h2>
+          <div id="recentEmojisPanel" class="emoji-panel"></div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Favorite Emojis</h2>
+          <div id="favoriteEmojisPanel" class="emoji-panel"></div>
+        </section>
+
+        <section class="card">
           <div class="card-header-row">
             <h2 class="card-title">Premium History</h2>
             <div class="segmented-toggle" role="group" aria-label="Premium history view mode">
@@ -99,6 +109,8 @@
       const statusBadgeEl = document.getElementById('statusBadge')
       const premiumHistoryEl = document.getElementById('premiumHistory')
       const badgePanelEl = document.getElementById('badgePanel')
+      const recentEmojisPanelEl = document.getElementById('recentEmojisPanel')
+      const favoriteEmojisPanelEl = document.getElementById('favoriteEmojisPanel')
       const premiumModeTextEl = document.getElementById('premiumModeText')
       const premiumModeGraphEl = document.getElementById('premiumModeGraph')
 
@@ -116,6 +128,8 @@
         status: 'idle',
         premiumHistory: [],
         badges: [],
+        recentEmojis: [],
+        favoriteEmojis: [],
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -396,6 +410,48 @@
           .join('')
       }
 
+      function renderEmojiChip(emoji) {
+        const lastUsed = emoji.lastUsedTimestamp
+          ? formatTimestampForDisplay(emoji.lastUsedTimestamp)
+          : 'Unknown'
+        const tooltip = `Total uses: ${emoji.totalUses} • Last used: ${lastUsed} • Channels: ${emoji.channelCount}`
+        const displayName = emoji.type === 'custom' ? `:${emoji.name}:` : emoji.unicode || emoji.raw || emoji.name
+
+        const mediaHtml =
+          emoji.type === 'custom' && emoji.assetUrl
+            ? `<img class="emoji-image" src="${escapeHtml(emoji.assetUrl)}" alt="${escapeHtml(displayName)}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false;" />
+               <span class="emoji-fallback" hidden>${escapeHtml(displayName)}</span>`
+            : `<span class="emoji-fallback">${escapeHtml(displayName)}</span>`
+
+        return `<span class="emoji-chip" title="${escapeHtml(tooltip)}">
+          <span class="emoji-media">${mediaHtml}</span>
+          <span class="emoji-meta">
+            <span class="emoji-label">${escapeHtml(displayName)}</span>
+            <span class="muted small">×${emoji.totalUses}</span>
+          </span>
+        </span>`
+      }
+
+      function renderEmojiPanels() {
+        if (!state.latestImportId || !state.importMeta?.ok) {
+          recentEmojisPanelEl.innerHTML = '<div class="muted small">Import a package to view emoji usage.</div>'
+          favoriteEmojisPanelEl.innerHTML = '<div class="muted small">Import a package to view emoji usage.</div>'
+          return
+        }
+
+        if (!state.recentEmojis.length) {
+          recentEmojisPanelEl.innerHTML = '<div class="muted small">No emoji usage found in messages/reactions.</div>'
+        } else {
+          recentEmojisPanelEl.innerHTML = state.recentEmojis.map(renderEmojiChip).join('')
+        }
+
+        if (!state.favoriteEmojis.length) {
+          favoriteEmojisPanelEl.innerHTML = '<div class="muted small">No emoji usage found in messages/reactions.</div>'
+        } else {
+          favoriteEmojisPanelEl.innerHTML = state.favoriteEmojis.map(renderEmojiChip).join('')
+        }
+      }
+
       function renderTimeline() {
         if (!state.latestImportId) {
           timelineTitleEl.textContent = 'Message Timeline'
@@ -470,6 +526,7 @@
         renderChannelList()
         renderTimeline()
         renderBadges()
+        renderEmojiPanels()
         renderPremiumHistory()
 
         if (state.importMeta?.warnings?.length) {
@@ -512,6 +569,8 @@
           state.messagesByChannel = {}
           state.premiumHistory = []
           state.badges = []
+          state.recentEmojis = []
+          state.favoriteEmojis = []
           setStatus('error', 'Error')
           render()
           return
@@ -521,6 +580,8 @@
         state.messagesByChannel = parserPage.messagesByChannel || {}
         state.premiumHistory = parserPage.premiumHistory || []
         state.badges = parserPage.badges || []
+        state.recentEmojis = parserPage.recentEmojis || []
+        state.favoriteEmojis = parserPage.favoriteEmojis || []
         if (!state.selectedChannelId && state.channels.length > 0) {
           state.selectedChannelId = state.channels[0].id
         }
