@@ -8,6 +8,7 @@ const {
   parseDiscordExport,
   getPaginatedParserOutput,
 } = require('./src/main/parser/discordExport')
+const { IMPORT_STATES } = require('./src/shared/importStates')
 
 const IMPORTS_SUBDIR = 'imports'
 const IMPORT_RETENTION_MS = 1000 * 60 * 60 * 24 * 7
@@ -16,6 +17,7 @@ const PARSER_DEBUG_LOG = 'parser-debug.log'
 const ANALYTICS_CACHE_SUBDIR = 'analytics-cache'
 const parsedArchiveCache = new Map()
 const activeParserJobs = new Map()
+let activeImportRequest = null
 
 const KNOWN_SECTION_DETECTORS = [
   {
@@ -131,44 +133,26 @@ function getCachedParse(importId) {
   return parsedArchiveCache.get(importId)
 }
 
-async function handleSelectZip(event, payload = {}) {
-  const { canceled, filePaths } = await dialog.showOpenDialog({
-    title: 'Select Discord Data Package',
-    properties: ['openFile'],
-    filters: [
-      { name: 'ZIP archive', extensions: ['zip'] },
-      { name: 'All files', extensions: ['*'] },
-    ],
-  })
-
-  if (canceled || filePaths.length === 0) {
-    return null
+function emitImportStatus(event, payload) {
+  if (!event?.sender || event.sender.isDestroyed()) {
+    return
   }
+  event.sender.send('import:status', payload)
+}
 
-  const warnings = []
-  const selectedZipPath = filePaths[0]
-  const importsRoot = path.join(app.getPath('userData'), IMPORTS_SUBDIR)
-  const analyticsCacheRoot = path.join(app.getPath('userData'), ANALYTICS_CACHE_SUBDIR)
-
-  await cleanupOldImports(importsRoot)
-  await fs.mkdir(analyticsCacheRoot, { recursive: true })
-
+async function handleSelectZip(event, payload = {}) {
   const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const rootPath = path.join(importsRoot, importId)
-  const importHash = await computeFileSha256(selectedZipPath)
-  const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
-
-  await fs.mkdir(rootPath, { recursive: true })
-
-  try {
-    await extract(selectedZipPath, { dir: rootPath })
-  } catch (error) {
-    await fs.rm(rootPath, { recursive: true, force: true })
+  if (activeImportRequest && activeImportRequest !== importId) {
+    emitImportStatus(event, {
+      importId,
+      state: IMPORT_STATES.FAILED,
+      message: `Another import (${activeImportRequest}) is already running.`,
+    })
     return {
       ok: false,
       importId,
-      rootPath,
-      warnings: [`Failed to extract ZIP archive: ${error.message}`],
+      busy: true,
+      warnings: ['Another import is already in progress. Please wait for it to finish.'],
       detectedSections: [],
       parserSummary: {
         channelCount: 0,
@@ -177,96 +161,194 @@ async function handleSelectZip(event, payload = {}) {
     }
   }
 
-  const detectedSections = await detectSections(rootPath)
-  const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
-  const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
+  activeImportRequest = importId
+  emitImportStatus(event, {
+    importId,
+    state: IMPORT_STATES.SELECTING_FILE,
+    message: 'Waiting for ZIP file selection.',
+  })
 
-  if (detectedSections.length === 0) {
-    warnings.push(
-      'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
-    )
-  } else if (missingSections.length > 0) {
-    warnings.push(
-      `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
-    )
-  }
+  try {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Select Discord Data Package',
+      properties: ['openFile'],
+      filters: [
+        { name: 'ZIP archive', extensions: ['zip'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    })
 
-  let parsedExport
-  if (cachedAnalytics) {
-    parsedExport = cachedAnalytics
-    if (event?.sender && !event.sender.isDestroyed()) {
-      event.sender.send('parser:progress', {
+    if (canceled || filePaths.length === 0) {
+      emitImportStatus(event, {
         importId,
-        importHash,
-        stage: 'complete',
-        filesScanned: 0,
-        totalFiles: 0,
-        recordsProcessed: parsedExport.analyticsSummary?.messageCount ?? 0,
-        currentPath: null,
-        etaSeconds: 0,
-        elapsedMs: 0,
-        cacheHit: true,
+        state: IMPORT_STATES.CANCELED,
+        message: 'Import canceled before file selection.',
       })
+      return null
     }
-  } else {
-    const parseAbortController = new AbortController()
-    activeParserJobs.set(importId, { abortController: parseAbortController })
-    try {
-      parsedExport = await parseDiscordExport(rootPath, {
-        sortDirection: 'asc',
-        signal: parseAbortController.signal,
-        onProgress: (progress) => {
-          if (event?.sender && !event.sender.isDestroyed()) {
-            event.sender.send('parser:progress', {
-              importId,
-              importHash,
-              ...progress,
-            })
-          }
-        },
+
+    const warnings = []
+    const selectedZipPath = filePaths[0]
+    const importsRoot = path.join(app.getPath('userData'), IMPORTS_SUBDIR)
+    const analyticsCacheRoot = path.join(app.getPath('userData'), ANALYTICS_CACHE_SUBDIR)
+
+    await cleanupOldImports(importsRoot)
+    await fs.mkdir(analyticsCacheRoot, { recursive: true })
+
+    const rootPath = path.join(importsRoot, importId)
+    const importHash = await computeFileSha256(selectedZipPath)
+    const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
+
+    await fs.mkdir(rootPath, { recursive: true })
+
+    emitImportStatus(event, {
+      importId,
+      state: IMPORT_STATES.EXTRACTING_ZIP,
+      message: 'Extracting ZIP archive.',
+    })
+    await extract(selectedZipPath, { dir: rootPath })
+
+    emitImportStatus(event, {
+      importId,
+      state: IMPORT_STATES.SCANNING_FILES,
+      message: 'Scanning extracted files for Discord sections.',
+    })
+    const detectedSections = await detectSections(rootPath)
+    const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
+    const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
+
+    if (detectedSections.length === 0) {
+      warnings.push(
+        'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
+      )
+    } else if (missingSections.length > 0) {
+      warnings.push(
+        `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
+      )
+    }
+
+    let parsedExport
+    if (cachedAnalytics) {
+      emitImportStatus(event, {
+        importId,
+        state: IMPORT_STATES.AGGREGATING,
+        message: 'Using cached analytics.',
       })
-      await persistAnalyticsCache(analyticsCacheRoot, importHash, parsedExport)
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        await fs.rm(rootPath, { recursive: true, force: true })
-        return {
-          ok: false,
-          canceled: true,
+      parsedExport = cachedAnalytics
+      if (event?.sender && !event.sender.isDestroyed()) {
+        event.sender.send('parser:progress', {
           importId,
           importHash,
-          rootPath,
-          warnings: ['Import cancelled before analytics indexing finished.'],
-          detectedSections: [],
-          parserSummary: {
-            channelCount: 0,
-            messageCount: 0,
-          },
-        }
+          stage: 'complete',
+          filesScanned: 0,
+          totalFiles: 0,
+          recordsProcessed: parsedExport.analyticsSummary?.messageCount ?? 0,
+          currentPath: null,
+          etaSeconds: 0,
+          elapsedMs: 0,
+          cacheHit: true,
+        })
       }
+    } else {
+      emitImportStatus(event, {
+        importId,
+        state: IMPORT_STATES.PARSING,
+        message: 'Parsing Discord export files.',
+      })
+      const parseAbortController = new AbortController()
+      activeParserJobs.set(importId, { abortController: parseAbortController })
+      try {
+        parsedExport = await parseDiscordExport(rootPath, {
+          sortDirection: 'asc',
+          signal: parseAbortController.signal,
+          onProgress: (progress) => {
+            if (event?.sender && !event.sender.isDestroyed()) {
+              event.sender.send('parser:progress', {
+                importId,
+                importHash,
+                ...progress,
+              })
+            }
+          },
+        })
+        emitImportStatus(event, {
+          importId,
+          state: IMPORT_STATES.AGGREGATING,
+          message: 'Aggregating analytics output.',
+        })
+        await persistAnalyticsCache(analyticsCacheRoot, importHash, parsedExport)
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          await fs.rm(rootPath, { recursive: true, force: true })
+          emitImportStatus(event, {
+            importId,
+            state: IMPORT_STATES.CANCELED,
+            message: 'Import canceled by user.',
+          })
+          return {
+            ok: false,
+            canceled: true,
+            importId,
+            importHash,
+            rootPath,
+            warnings: ['Import cancelled before analytics indexing finished.'],
+            detectedSections: [],
+            parserSummary: {
+              channelCount: 0,
+              messageCount: 0,
+            },
+          }
+        }
 
-      throw error
-    } finally {
-      activeParserJobs.delete(importId)
+        throw error
+      } finally {
+        activeParserJobs.delete(importId)
+      }
     }
-  }
 
-  await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
-  parsedArchiveCache.set(importId, parsedExport)
+    await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
+    parsedArchiveCache.set(importId, parsedExport)
 
-  return {
-    ok: true,
-    importId,
-    importHash,
-    cacheHit: Boolean(cachedAnalytics),
-    rootPath,
-    warnings: [...warnings, ...parsedExport.warnings],
-    detectedSections,
-    missingSections,
-    parserSummary: {
-      channelCount: parsedExport.analyticsSummary.channelCount,
-      messageCount: parsedExport.analyticsSummary.messageCount,
-      sortDirection: parsedExport.sortDirection,
-    },
+    emitImportStatus(event, {
+      importId,
+      state: IMPORT_STATES.COMPLETED,
+      message: 'Import completed successfully.',
+    })
+    return {
+      ok: true,
+      importId,
+      importHash,
+      cacheHit: Boolean(cachedAnalytics),
+      rootPath,
+      warnings: [...warnings, ...parsedExport.warnings],
+      detectedSections,
+      missingSections,
+      parserSummary: {
+        channelCount: parsedExport.analyticsSummary.channelCount,
+        messageCount: parsedExport.analyticsSummary.messageCount,
+        sortDirection: parsedExport.sortDirection,
+      },
+    }
+  } catch (error) {
+    emitImportStatus(event, {
+      importId,
+      state: IMPORT_STATES.FAILED,
+      message: `Import failed: ${error.message}`,
+    })
+    return {
+      ok: false,
+      importId,
+      warnings: [`Import failed: ${error.message}`],
+      detectedSections: [],
+      parserSummary: {
+        channelCount: 0,
+        messageCount: 0,
+      },
+    }
+  } finally {
+    if (activeImportRequest === importId) {
+      activeImportRequest = null
+    }
   }
 }
 
