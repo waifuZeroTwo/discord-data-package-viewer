@@ -681,6 +681,41 @@ select {
   margin: 8px 0 12px;
 }
 
+.hidden {
+  display: none;
+}
+
+.progress-panel {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-elevated);
+  display: grid;
+  gap: 6px;
+}
+
+.progress-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.progress-track {
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #0f172a;
+  overflow: hidden;
+}
+
+.progress-fill {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #7c8cf8, #48b2ff);
+  transition: width 160ms linear;
+}
+
 .inline-warning {
   border: 1px solid color-mix(in oklab, var(--warning) 60%, var(--border));
   background: color-mix(in oklab, var(--warning) 12%, transparent);

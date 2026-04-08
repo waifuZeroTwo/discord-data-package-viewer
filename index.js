@@ -4,6 +4,7 @@ const fs = require('fs/promises')
 const crypto = require('crypto')
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const extract = require('extract-zip')
+const yauzl = require('yauzl')
 const {
   parseDiscordExport,
   getPaginatedParserOutput,
@@ -140,6 +141,88 @@ function emitImportStatus(event, payload) {
   event.sender.send('import:status', payload)
 }
 
+function normalizeProgressPayload(payload = {}) {
+  const filesTotal = Number.isFinite(payload.filesTotal) ? payload.filesTotal : null
+  const filesDone = Number.isFinite(payload.filesDone) ? payload.filesDone : null
+  const percentFromPayload = Number.isFinite(payload.percent) ? payload.percent : null
+  const computedPercent =
+    filesTotal && filesTotal > 0 && Number.isFinite(filesDone)
+      ? Math.max(0, Math.min(100, Math.round((filesDone / filesTotal) * 100)))
+      : null
+
+  return {
+    phase: typeof payload.phase === 'string' ? payload.phase : 'unknown',
+    percent: percentFromPayload ?? computedPercent,
+    filesTotal,
+    filesDone,
+    recordsDone: Number.isFinite(payload.recordsDone) ? payload.recordsDone : null,
+    message: typeof payload.message === 'string' ? payload.message : '',
+    updatedAt: new Date().toISOString(),
+    heartbeat: Boolean(payload.heartbeat),
+  }
+}
+
+function emitParserProgress(event, meta, payload) {
+  if (!event?.sender || event.sender.isDestroyed()) {
+    return
+  }
+  event.sender.send('parser:progress', {
+    importId: meta.importId,
+    importHash: meta.importHash,
+    progress: normalizeProgressPayload(payload),
+  })
+}
+
+async function countZipFileEntries(zipPath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (openError, zipFile) => {
+      if (openError) {
+        reject(openError)
+        return
+      }
+
+      let fileCount = 0
+      zipFile.readEntry()
+      zipFile.on('entry', (entry) => {
+        if (!/\/$/.test(entry.fileName)) {
+          fileCount += 1
+        }
+        zipFile.readEntry()
+      })
+      zipFile.on('end', () => resolve(fileCount))
+      zipFile.on('error', (error) => reject(error))
+    })
+  })
+}
+
+async function extractZipWithProgress(zipPath, outputDir, onProgress) {
+  let filesTotal = null
+  try {
+    filesTotal = await countZipFileEntries(zipPath)
+  } catch {
+    filesTotal = null
+  }
+
+  let filesDone = 0
+  await extract(zipPath, {
+    dir: outputDir,
+    onEntry: (entry) => {
+      if (/\/$/.test(entry.fileName)) {
+        return
+      }
+      filesDone += 1
+      if (typeof onProgress === 'function') {
+        onProgress({
+          phase: 'extracting',
+          filesTotal,
+          filesDone,
+          message: `Extracted ${filesDone}${filesTotal ? `/${filesTotal}` : ''} files`,
+        })
+      }
+    },
+  })
+}
+
 async function handleSelectZip(event, payload = {}) {
   const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   if (activeImportRequest && activeImportRequest !== importId) {
@@ -206,7 +289,15 @@ async function handleSelectZip(event, payload = {}) {
       state: IMPORT_STATES.EXTRACTING_ZIP,
       message: 'Extracting ZIP archive.',
     })
-    await extract(selectedZipPath, { dir: rootPath })
+    emitParserProgress(event, { importId, importHash }, {
+      phase: 'extracting',
+      percent: 0,
+      filesDone: 0,
+      message: 'Starting ZIP extraction.',
+    })
+    await extractZipWithProgress(selectedZipPath, rootPath, (progress) => {
+      emitParserProgress(event, { importId, importHash }, progress)
+    })
 
     emitImportStatus(event, {
       importId,
@@ -235,20 +326,12 @@ async function handleSelectZip(event, payload = {}) {
         message: 'Using cached analytics.',
       })
       parsedExport = cachedAnalytics
-      if (event?.sender && !event.sender.isDestroyed()) {
-        event.sender.send('parser:progress', {
-          importId,
-          importHash,
-          stage: 'complete',
-          filesScanned: 0,
-          totalFiles: 0,
-          recordsProcessed: parsedExport.analyticsSummary?.messageCount ?? 0,
-          currentPath: null,
-          etaSeconds: 0,
-          elapsedMs: 0,
-          cacheHit: true,
-        })
-      }
+      emitParserProgress(event, { importId, importHash }, {
+        phase: 'complete',
+        percent: 100,
+        recordsDone: parsedExport.analyticsSummary?.messageCount ?? 0,
+        message: 'Cache hit: loaded analytics from previous import.',
+      })
     } else {
       emitImportStatus(event, {
         importId,
@@ -257,18 +340,27 @@ async function handleSelectZip(event, payload = {}) {
       })
       const parseAbortController = new AbortController()
       activeParserJobs.set(importId, { abortController: parseAbortController })
+      let latestProgress = null
+      let heartbeatInterval = null
       try {
+        heartbeatInterval = setInterval(() => {
+          if (!latestProgress) {
+            return
+          }
+
+          emitParserProgress(event, { importId, importHash }, {
+            ...latestProgress,
+            heartbeat: true,
+            message: `${latestProgress.message} (still working)`,
+          })
+        }, 1500)
+
         parsedExport = await parseDiscordExport(rootPath, {
           sortDirection: 'asc',
           signal: parseAbortController.signal,
           onProgress: (progress) => {
-            if (event?.sender && !event.sender.isDestroyed()) {
-              event.sender.send('parser:progress', {
-                importId,
-                importHash,
-                ...progress,
-              })
-            }
+            latestProgress = progress
+            emitParserProgress(event, { importId, importHash }, progress)
           },
         })
         emitImportStatus(event, {
@@ -302,6 +394,9 @@ async function handleSelectZip(event, payload = {}) {
 
         throw error
       } finally {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval)
+        }
         activeParserJobs.delete(importId)
       }
     }

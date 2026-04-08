@@ -41,6 +41,15 @@
         <section class="card">
           <h2 id="timelineTitle" class="card-title">Analytics Dashboard</h2>
           <p id="importStatus" class="muted small">No package selected.</p>
+          <div id="progressPanel" class="progress-panel hidden">
+            <div class="progress-row">
+              <span id="progressPhase" class="small muted">Phase: waiting</span>
+              <span id="progressPercent" class="small muted">0%</span>
+            </div>
+            <div class="progress-track"><div id="progressBarFill" class="progress-fill"></div></div>
+            <div id="progressDetails" class="small muted"></div>
+            <div id="progressUpdatedAt" class="small muted"></div>
+          </div>
           <div id="nonBlockingWarnings" class="inline-warning-list"></div>
           <div id="timeline" class="timeline"></div>
         </section>
@@ -120,6 +129,12 @@
       const timelineTitleEl = document.getElementById('timelineTitle')
       const statusBadgeEl = document.getElementById('statusBadge')
       const nonBlockingWarningsEl = document.getElementById('nonBlockingWarnings')
+      const progressPanelEl = document.getElementById('progressPanel')
+      const progressPhaseEl = document.getElementById('progressPhase')
+      const progressPercentEl = document.getElementById('progressPercent')
+      const progressBarFillEl = document.getElementById('progressBarFill')
+      const progressDetailsEl = document.getElementById('progressDetails')
+      const progressUpdatedAtEl = document.getElementById('progressUpdatedAt')
       const premiumHistoryEl = document.getElementById('premiumHistory')
       const badgePanelEl = document.getElementById('badgePanel')
       const connectionsPanelEl = document.getElementById('connectionsPanel')
@@ -231,6 +246,47 @@
           return
         }
         importStatusEl.textContent = IMPORT_STATUS_MESSAGES[nextState] || IMPORT_STATUS_MESSAGES[IMPORT_STATES.IDLE]
+      }
+
+      function formatProgressPhase(phase) {
+        if (!phase || typeof phase !== 'string') {
+          return 'Working'
+        }
+
+        return phase
+          .replaceAll('_', ' ')
+          .replace(/^\w/, (char) => char.toUpperCase())
+      }
+
+      function renderProgress() {
+        const progress = state.parserProgress
+        if (!progress || !state.isParsing) {
+          progressPanelEl.classList.add('hidden')
+          return
+        }
+
+        progressPanelEl.classList.remove('hidden')
+        const percent = Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : null
+        progressPhaseEl.textContent = `Phase: ${formatProgressPhase(progress.phase)}`
+        progressPercentEl.textContent = percent === null ? '—' : `${percent}%`
+        progressBarFillEl.style.width = `${percent ?? 0}%`
+
+        const details = []
+        if (Number.isFinite(progress.filesDone) || Number.isFinite(progress.filesTotal)) {
+          details.push(`Files ${progress.filesDone ?? 0}/${progress.filesTotal ?? '—'}`)
+        }
+        if (Number.isFinite(progress.recordsDone)) {
+          details.push(`Records ${progress.recordsDone}`)
+        }
+        if (progress.message) {
+          details.push(progress.message)
+        }
+        progressDetailsEl.textContent = details.join(' • ')
+
+        const updatedAtEpoch = progress.updatedAt ? Date.parse(progress.updatedAt) : Number.NaN
+        progressUpdatedAtEl.textContent = Number.isNaN(updatedAtEpoch)
+          ? ''
+          : `Last updated: ${timestampFormatter.format(new Date(updatedAtEpoch))}${progress.heartbeat ? ' • heartbeat' : ''}`
       }
 
       function escapeHtml(value) {
@@ -1033,6 +1089,7 @@
         renderTopRankings()
         renderBilling()
         renderPremiumHistory()
+        renderProgress()
         renderPanelDataDetails(badgeDetailsEl, 'Badges', state.parserMetadata.badges)
         renderPanelDataDetails(connectionsDetailsEl, 'Connections', state.parserMetadata.connections)
         renderPanelDataDetails(emojiDetailsEl, 'Emojis', state.parserMetadata.emojis)
@@ -1205,23 +1262,19 @@
       })
 
       window.ddpApi.onParserProgress((progress) => {
-        if (!progress || progress.importId !== state.latestImportId) {
+        if (!progress || progress.importId !== state.latestImportId || !progress.progress) {
           return
         }
 
-        state.parserProgress = progress
-        state.isParsing = progress.stage !== 'complete'
+        state.parserProgress = progress.progress
+        state.isParsing = progress.progress.phase !== 'complete'
 
-        if (progress.cacheHit) {
-          importStatusEl.textContent = 'Cache hit: loaded analytics from previous import.'
-        } else if (progress.stage === 'parsing') {
-          const eta = Number.isFinite(progress.etaSeconds) ? `${progress.etaSeconds}s` : 'estimating...'
-          importStatusEl.textContent = `Parsing ${progress.filesScanned}/${progress.totalFiles} files • ${progress.recordsProcessed} records • ETA ${eta}`
-        } else if (progress.stage === 'finalizing') {
-          importStatusEl.textContent = `Finalizing analytics (${progress.recordsProcessed} records)...`
+        if (progress.progress.message) {
+          importStatusEl.textContent = progress.progress.message
         }
 
         renderTopRankings()
+        renderProgress()
       })
 
       window.ddpApi.onImportStatus((payload) => {
