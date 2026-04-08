@@ -134,6 +134,9 @@ function extractCustomEmojiMatches(text) {
   for (const match of text.matchAll(pattern)) {
     const groups = match.groups || {}
     matches.push({
+      eventType: 'emoji',
+      source: 'content',
+      classification: 'custom',
       type: 'custom',
       name: groups.name || 'emoji',
       customId: groups.id || null,
@@ -156,7 +159,10 @@ function extractUnicodeEmojiMatches(text) {
     /(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?)(?:\u200D(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?))*)/gu
   for (const match of text.matchAll(pattern)) {
     matches.push({
-      type: 'unicode',
+      eventType: 'emoji',
+      source: 'content',
+      classification: 'native',
+      type: 'native',
       unicode: match[0],
       raw: match[0],
       count: 1,
@@ -185,7 +191,10 @@ function normalizeReactions(rawMessage) {
       const name = typeof emoji.name === 'string' && emoji.name ? emoji.name : 'emoji'
 
       return {
-        type: customId ? 'custom' : 'unicode',
+        eventType: 'emoji',
+        source: 'reaction',
+        classification: customId ? 'custom' : 'native',
+        type: customId ? 'custom' : 'native',
         name,
         customId,
         unicode,

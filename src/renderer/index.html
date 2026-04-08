@@ -62,13 +62,13 @@
         </section>
 
         <section class="card">
-          <h2 class="card-title">Recent Emojis</h2>
+          <h2 class="card-title">Top Emojis (Custom + Native)</h2>
           <div id="recentEmojisPanel" class="emoji-panel"></div>
           <div id="emojiDetails"></div>
         </section>
 
         <section class="card">
-          <h2 class="card-title">Favorite Emojis</h2>
+          <h2 class="card-title">Top Custom Emojis</h2>
           <div id="favoriteEmojisPanel" class="emoji-panel"></div>
         </section>
 
@@ -608,13 +608,16 @@
         const lastUsed = emoji.lastUsedTimestamp
           ? formatTimestampForDisplay(emoji.lastUsedTimestamp)
           : 'Unknown'
-        const tooltip = `Total uses: ${emoji.totalUses} • Last used: ${lastUsed} • Channels: ${emoji.channelCount}`
+        const contextCount = Number.isFinite(emoji.contextCount) ? emoji.contextCount : 0
+        const tooltip = `Total uses: ${emoji.totalUses} • Last used: ${lastUsed} • Distinct contexts: ${contextCount}`
         const displayName = emoji.type === 'custom' ? `:${emoji.name}:` : emoji.unicode || emoji.raw || emoji.name
+        const fallbackGlyph = '◻'
+        const fallbackLabel = `${fallbackGlyph} ${displayName}`
 
         const mediaHtml =
           emoji.type === 'custom' && emoji.assetUrl
             ? `<img class="emoji-image" src="${escapeHtml(emoji.assetUrl)}" alt="${escapeHtml(displayName)}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false;" />
-               <span class="emoji-fallback" hidden>${escapeHtml(displayName)}</span>`
+               <span class="emoji-fallback" hidden>${escapeHtml(fallbackLabel)}</span>`
             : `<span class="emoji-fallback">${escapeHtml(displayName)}</span>`
 
         return `<span class="emoji-chip" title="${escapeHtml(tooltip)}">
