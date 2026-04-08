@@ -474,6 +474,40 @@ select {
   font-weight: 700;
 }
 
+.top-rankings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.top-ranking-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.top-ranking-item {
+  display: grid;
+  gap: 3px;
+}
+
+.top-ranking-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.top-ranking-rank {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.top-ranking-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .billing-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

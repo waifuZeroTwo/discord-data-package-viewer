@@ -45,6 +45,11 @@
         </section>
 
         <section class="card">
+          <h2 class="card-title">Top Message Destinations</h2>
+          <div id="topRankingsPanel" class="top-rankings-grid"></div>
+        </section>
+
+        <section class="card">
           <h2 class="card-title">Badges</h2>
           <div id="badgePanel" class="badge-panel"></div>
           <div id="badgeDetails"></div>
@@ -130,6 +135,7 @@
       const emojiDetailsEl = document.getElementById('emojiDetails')
       const billingDetailsEl = document.getElementById('billingDetails')
       const premiumDetailsEl = document.getElementById('premiumDetails')
+      const topRankingsPanelEl = document.getElementById('topRankingsPanel')
 
       const versions = window.ddpApi.getRuntimeVersions()
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
@@ -157,6 +163,11 @@
           summaryCurrency: null,
         },
         parserMetadata: {},
+        dashboardMetrics: {},
+        analyticsSummary: {
+          channelCount: 0,
+          messageCount: 0,
+        },
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -550,6 +561,53 @@
         renderPanelDataDetails(emojiDetailsEl, 'Emojis', state.parserMetadata.emojis)
       }
 
+      function renderTopMetricList(title, rows) {
+        if (!Array.isArray(rows) || rows.length === 0) {
+          return `<div class="summary-card">
+            <div class="summary-value small">${escapeHtml(title)}</div>
+            <div class="muted small">No messages found for this category.</div>
+          </div>`
+        }
+
+        const totalMessages =
+          Number.isFinite(state.analyticsSummary?.messageCount) && state.analyticsSummary.messageCount > 0
+            ? state.analyticsSummary.messageCount
+            : 0
+
+        const listHtml = rows
+          .map((entry, index) => {
+            const percentage = totalMessages > 0 ? (entry.count / totalMessages) * 100 : 0
+            return `<li class="top-ranking-item">
+              <div class="top-ranking-line">
+                <span class="top-ranking-rank">#${index + 1}</span>
+                <span class="top-ranking-name">${escapeHtml(entry.label || entry.key || 'Unknown')}</span>
+              </div>
+              <div class="muted small">${escapeHtml(String(entry.count || 0))} messages • ${percentage.toFixed(2)}%</div>
+            </li>`
+          })
+          .join('')
+
+        return `<div class="summary-card">
+          <div class="summary-value small">${escapeHtml(title)}</div>
+          <ol class="top-ranking-list">${listHtml}</ol>
+        </div>`
+      }
+
+      function renderTopRankings() {
+        if (!state.latestImportId || !state.importMeta?.ok) {
+          topRankingsPanelEl.innerHTML = '<div class="muted small">Import a package to view top rankings.</div>'
+          return
+        }
+
+        const metrics = state.dashboardMetrics || {}
+        topRankingsPanelEl.innerHTML = [
+          renderTopMetricList('Top Channels', metrics.topChannels),
+          renderTopMetricList('Top DMed Users', metrics.topDmedUsers),
+          renderTopMetricList('Top Guilds', metrics.topGuilds),
+          renderTopMetricList('Top Group DMs', metrics.topGroupDms),
+        ].join('')
+      }
+
       function getFilteredBillingTransactions() {
         const typeFilter = billingTypeFilterEl.value
         const statusFilter = billingStatusFilterEl.value
@@ -690,6 +748,7 @@
         renderBadges()
         renderConnections()
         renderEmojiPanels()
+        renderTopRankings()
         renderBilling()
         renderPremiumHistory()
         renderPanelDataDetails(badgeDetailsEl, 'Badges', state.parserMetadata.badges)
@@ -747,6 +806,11 @@
             summaryCurrency: null,
           }
           state.parserMetadata = {}
+          state.dashboardMetrics = {}
+          state.analyticsSummary = {
+            channelCount: 0,
+            messageCount: 0,
+          }
           setStatus('error', 'Error')
           render()
           return
@@ -761,6 +825,8 @@
         state.giftedNitro = parserPage.giftedNitro || []
         state.billingSummary = parserPage.billingSummary || state.billingSummary
         state.parserMetadata = parserPage.parserMetadata || {}
+        state.dashboardMetrics = parserPage.dashboardMetrics || {}
+        state.analyticsSummary = parserPage.analyticsSummary || state.analyticsSummary
         syncBillingFilterOptions()
         setStatus('ready', 'Ready')
         render()

@@ -14,7 +14,12 @@ function getIsoWeekKey(epochMs) {
 function toTopList(counterMap, limit = TOP_METRIC_LIMIT) {
   return Array.from(counterMap.entries())
     .map(([key, value]) => ({ key, ...value }))
-    .sort((a, b) => b.count - a.count || String(a.label || a.key).localeCompare(String(b.label || b.key)))
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        (b.characterCount || 0) - (a.characterCount || 0) ||
+        String(a.label || a.key).localeCompare(String(b.label || b.key)),
+    )
     .slice(0, limit)
 }
 
@@ -27,17 +32,26 @@ function buildEmojiAssetUrl(emoji) {
   return `https://cdn.discordapp.com/emojis/${emoji.customId}.${extension}?size=64&quality=lossless`
 }
 
-function bumpMetric(map, key, label, increment = 1, extra = {}) {
+function bumpMetric(map, key, label, increment = 1, extra = {}, characterIncrement = 0) {
   if (!key) {
     return
   }
 
-  const existing = map.get(key) || { label: label || key, count: 0, ...extra }
+  const existing = map.get(key) || { label: label || key, count: 0, characterCount: 0, ...extra }
   existing.count += increment
+  existing.characterCount += characterIncrement
   if (!existing.label && label) {
     existing.label = label
   }
   map.set(key, existing)
+}
+
+function formatUnknownLabel(entityName, entityId) {
+  if (entityId) {
+    return `Unknown ${entityName} (${entityId})`
+  }
+
+  return `Unknown ${entityName}`
 }
 
 function createAnalyticsIndexer() {
@@ -93,6 +107,7 @@ function createAnalyticsIndexer() {
       metrics.messageCount += 1
 
       const content = typeof message.content === 'string' ? message.content : ''
+      const characterCount = content.length
       metrics.characterCount += content.length
 
       const directMentionMatches = content.match(/<@!?(\d+)>/g)
@@ -115,14 +130,20 @@ function createAnalyticsIndexer() {
       bumpMetric(
         counters.channels,
         message.channelId,
-        message.channelName || `Channel ${message.channelId}`,
+        message.channelName || formatUnknownLabel('Channel', message.channelId),
+        1,
+        {},
+        characterCount,
       )
 
       if (message.dmUserId || message.dmUserName) {
         bumpMetric(
           counters.dmUsers,
           String(message.dmUserId || message.dmUserName),
-          message.dmUserName || `User ${message.dmUserId}`,
+          message.dmUserName || formatUnknownLabel('User', message.dmUserId),
+          1,
+          {},
+          characterCount,
         )
       }
 
@@ -130,7 +151,10 @@ function createAnalyticsIndexer() {
         bumpMetric(
           counters.guilds,
           String(message.guildId || message.guildName),
-          message.guildName || `Guild ${message.guildId}`,
+          message.guildName || formatUnknownLabel('Guild', message.guildId),
+          1,
+          {},
+          characterCount,
         )
       }
 
@@ -138,7 +162,10 @@ function createAnalyticsIndexer() {
         bumpMetric(
           counters.groupDMs,
           String(message.groupDmId || message.groupDmName),
-          message.groupDmName || `Group DM ${message.groupDmId}`,
+          message.groupDmName || formatUnknownLabel('Group DM', message.groupDmId),
+          1,
+          {},
+          characterCount,
         )
       }
 
