@@ -95,9 +95,14 @@ body {
 }
 
 .status-idle { color: var(--muted); }
-.status-loading { color: var(--warning); }
-.status-ready { color: var(--success); }
-.status-error { color: var(--error); }
+.status-selecting_file { color: var(--warning); }
+.status-extracting_zip { color: var(--warning); }
+.status-scanning_files { color: var(--warning); }
+.status-parsing { color: var(--warning); }
+.status-aggregating { color: var(--warning); }
+.status-completed { color: var(--success); }
+.status-failed { color: var(--error); }
+.status-canceled { color: var(--muted); }
 
 .layout {
   min-height: 0;
