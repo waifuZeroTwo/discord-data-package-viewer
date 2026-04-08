@@ -495,6 +495,311 @@ function extractConnectionsFromPayload(payload, sourcePath, warnings, sink = [])
   return sink
 }
 
+function normalizeCurrency(rawCurrency) {
+  if (typeof rawCurrency !== 'string' || rawCurrency.trim() === '') {
+    return null
+  }
+
+  return rawCurrency.trim().toUpperCase()
+}
+
+function parseAmountToMajorUnit(rawAmount) {
+  if (rawAmount === undefined || rawAmount === null || rawAmount === '') {
+    return null
+  }
+
+  const numericAmount = Number(rawAmount)
+  if (!Number.isFinite(numericAmount)) {
+    return null
+  }
+
+  if (Number.isInteger(numericAmount) && Math.abs(numericAmount) >= 100) {
+    return numericAmount / 100
+  }
+
+  return numericAmount
+}
+
+function normalizeTransactionType(rawType, fallbackDescription = '') {
+  const normalized = typeof rawType === 'string' ? rawType.trim().toLowerCase() : ''
+  if (
+    normalized.includes('refund') ||
+    fallbackDescription.includes('refund') ||
+    fallbackDescription.includes('chargeback')
+  ) {
+    return 'refund'
+  }
+
+  if (normalized.includes('gift') || fallbackDescription.includes('gift')) {
+    return 'gift'
+  }
+
+  if (normalized.includes('invoice')) {
+    return 'invoice'
+  }
+
+  if (normalized.includes('subscription') || normalized.includes('renewal') || normalized.includes('nitro')) {
+    return 'subscription'
+  }
+
+  if (normalized.includes('charge') || normalized.includes('payment')) {
+    return 'charge'
+  }
+
+  return normalized || 'unknown'
+}
+
+function normalizeBillingTransaction(rawRecord, sourcePath, warnings) {
+  if (!rawRecord || typeof rawRecord !== 'object') {
+    return null
+  }
+
+  const dateInput =
+    rawRecord.date ??
+    rawRecord.created_at ??
+    rawRecord.createdAt ??
+    rawRecord.timestamp ??
+    rawRecord.purchased_at ??
+    rawRecord.purchase_date
+  const parsedDate = parseTimestamp(dateInput)
+  if (dateInput && !parsedDate.value) {
+    warnings.push(`Billing record in ${sourcePath} had invalid timestamp: ${String(dateInput)}`)
+  }
+
+  const amount =
+    parseAmountToMajorUnit(rawRecord.amount) ??
+    parseAmountToMajorUnit(rawRecord.amount_total) ??
+    parseAmountToMajorUnit(rawRecord.total_amount) ??
+    parseAmountToMajorUnit(rawRecord.subtotal) ??
+    parseAmountToMajorUnit(rawRecord.price)
+  const currency = normalizeCurrency(rawRecord.currency ?? rawRecord.currency_code ?? rawRecord.currencyCode)
+
+  const descriptionParts = [
+    rawRecord.description,
+    rawRecord.memo,
+    rawRecord.name,
+    rawRecord.plan_name,
+    rawRecord.planName,
+    rawRecord.title,
+  ].filter((item) => typeof item === 'string' && item.trim())
+  const description = descriptionParts.length > 0 ? descriptionParts.join(' • ') : 'Billing transaction'
+
+  const statusRaw = rawRecord.status ?? rawRecord.state ?? rawRecord.payment_status ?? rawRecord.paymentStatus
+  const status = typeof statusRaw === 'string' && statusRaw.trim() ? statusRaw.trim().toLowerCase() : 'unknown'
+
+  const relatedSubscriptionId =
+    rawRecord.subscription_id ??
+    rawRecord.subscriptionId ??
+    rawRecord.plan_id ??
+    rawRecord.planId ??
+    rawRecord.renewal_id
+
+  const type = normalizeTransactionType(
+    rawRecord.type ?? rawRecord.transaction_type ?? rawRecord.transactionType ?? rawRecord.kind,
+    description.toLowerCase(),
+  )
+
+  if (!parsedDate.value && amount === null && type === 'unknown') {
+    return null
+  }
+
+  return {
+    date: parsedDate.value,
+    amount,
+    currency,
+    type,
+    status,
+    description,
+    relatedSubscriptionId:
+      relatedSubscriptionId === undefined || relatedSubscriptionId === null || relatedSubscriptionId === ''
+        ? null
+        : String(relatedSubscriptionId),
+    source: sourcePath,
+  }
+}
+
+function normalizeGiftRedemption(rawGift, sourcePath, warnings) {
+  if (!rawGift || typeof rawGift !== 'object') {
+    return null
+  }
+
+  const dateInput =
+    rawGift.redeemed_at ??
+    rawGift.redeemedAt ??
+    rawGift.claimed_at ??
+    rawGift.claimedAt ??
+    rawGift.created_at
+  const parsedDate = parseTimestamp(dateInput)
+  if (dateInput && !parsedDate.value) {
+    warnings.push(`Gift redemption in ${sourcePath} had invalid timestamp: ${String(dateInput)}`)
+  }
+
+  const subscriptionId =
+    rawGift.subscription_id ??
+    rawGift.subscriptionId ??
+    rawGift.premium_subscription_id ??
+    rawGift.premiumSubscriptionId
+  const amount = parseAmountToMajorUnit(rawGift.amount ?? rawGift.value ?? rawGift.price)
+  const currency = normalizeCurrency(rawGift.currency ?? rawGift.currency_code ?? rawGift.currencyCode)
+  const code = rawGift.code ?? rawGift.gift_code ?? rawGift.giftCode
+  const description = rawGift.description ?? rawGift.plan_name ?? rawGift.planName ?? 'Gifted Nitro redemption'
+
+  if (!parsedDate.value && !subscriptionId && !code) {
+    return null
+  }
+
+  return {
+    date: parsedDate.value,
+    amount,
+    currency,
+    type: 'gift',
+    status: 'redeemed',
+    description: String(description),
+    relatedSubscriptionId:
+      subscriptionId === undefined || subscriptionId === null || subscriptionId === '' ? null : String(subscriptionId),
+    source: sourcePath,
+    giftCode: code === undefined || code === null || code === '' ? null : String(code),
+  }
+}
+
+function extractBillingDataFromPayload(payload, sourcePath, warnings, sink = { transactions: [], giftedNitro: [] }) {
+  if (!payload || typeof payload !== 'object') {
+    return sink
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      extractBillingDataFromPayload(item, sourcePath, warnings, sink)
+    }
+    return sink
+  }
+
+  const transactionCollections = [
+    payload.invoices,
+    payload.invoice_history,
+    payload.payments,
+    payload.payment_history,
+    payload.charges,
+    payload.transactions,
+    payload.refunds,
+    payload.subscriptions,
+    payload.subscription_history,
+  ]
+
+  for (const collection of transactionCollections) {
+    if (!Array.isArray(collection)) {
+      continue
+    }
+
+    for (const entry of collection) {
+      const normalized = normalizeBillingTransaction(entry, sourcePath, warnings)
+      if (normalized) {
+        sink.transactions.push(normalized)
+      }
+    }
+  }
+
+  const giftCollections = [
+    payload.gift_redemptions,
+    payload.giftRedemptions,
+    payload.gifts_received,
+    payload.giftsReceived,
+    payload.redeemed_gifts,
+  ]
+
+  for (const collection of giftCollections) {
+    if (!Array.isArray(collection)) {
+      continue
+    }
+
+    for (const entry of collection) {
+      const normalizedGift = normalizeGiftRedemption(entry, sourcePath, warnings)
+      if (normalizedGift) {
+        sink.giftedNitro.push(normalizedGift)
+        sink.transactions.push({
+          date: normalizedGift.date,
+          amount: normalizedGift.amount,
+          currency: normalizedGift.currency,
+          type: normalizedGift.type,
+          status: normalizedGift.status,
+          description: normalizedGift.description,
+          relatedSubscriptionId: normalizedGift.relatedSubscriptionId,
+          source: normalizedGift.source,
+        })
+      }
+    }
+  }
+
+  for (const [key, value] of Object.entries(payload)) {
+    if (
+      key === 'invoices' ||
+      key === 'payments' ||
+      key === 'charges' ||
+      key === 'transactions' ||
+      key === 'refunds' ||
+      key === 'subscriptions' ||
+      key === 'gift_redemptions' ||
+      key === 'giftRedemptions'
+    ) {
+      continue
+    }
+
+    if (value && typeof value === 'object') {
+      extractBillingDataFromPayload(value, sourcePath, warnings, sink)
+    }
+  }
+
+  return sink
+}
+
+function computeBillingSummary(transactions, giftedNitro) {
+  const metrics = {
+    transactionCount: transactions.length,
+    totalSpentGross: 0,
+    totalSpentNet: 0,
+    refundTotal: 0,
+    giftedNitroCount: giftedNitro.length,
+    giftedNitroValueReceived: 0,
+  }
+
+  for (const transaction of transactions) {
+    const amount = Number(transaction.amount)
+    if (!Number.isFinite(amount)) {
+      continue
+    }
+
+    metrics.totalSpentGross += amount
+
+    if (transaction.type !== 'refund') {
+      metrics.totalSpentNet += amount
+    } else {
+      metrics.refundTotal += Math.abs(amount)
+    }
+  }
+
+  for (const gift of giftedNitro) {
+    const amount = Number(gift.amount)
+    if (Number.isFinite(amount)) {
+      metrics.giftedNitroValueReceived += amount
+    }
+  }
+
+  const round = (value) => Math.round(value * 100) / 100
+  const knownCurrencies = Array.from(
+    new Set(transactions.map((item) => item.currency).filter((value) => typeof value === 'string' && value.trim())),
+  )
+
+  return {
+    transactionCount: metrics.transactionCount,
+    totalSpentGross: round(metrics.totalSpentGross),
+    totalSpentNet: round(metrics.totalSpentNet),
+    refundTotal: round(metrics.refundTotal),
+    giftedNitroCount: metrics.giftedNitroCount,
+    giftedNitroValueReceived: round(metrics.giftedNitroValueReceived),
+    summaryCurrency: knownCurrencies.length === 1 ? knownCurrencies[0] : null,
+  }
+}
+
 function getPaginatedParserOutput(parsedExport, options = {}) {
   const channelPage = Math.max(1, Number(options.channelPage) || 1)
   const channelPageSize = Math.max(1, Number(options.channelPageSize) || 25)
@@ -534,6 +839,17 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
     connections: parsedExport.connections ?? [],
     recentEmojis: parsedExport.recentEmojis ?? [],
     favoriteEmojis: parsedExport.favoriteEmojis ?? [],
+    billingTransactions: parsedExport.billingTransactions ?? [],
+    giftedNitro: parsedExport.giftedNitro ?? [],
+    billingSummary: parsedExport.billingSummary ?? {
+      transactionCount: 0,
+      totalSpentGross: 0,
+      totalSpentNet: 0,
+      refundTotal: 0,
+      giftedNitroCount: 0,
+      giftedNitroValueReceived: 0,
+      summaryCurrency: null,
+    },
     warnings: parsedExport.warnings,
     channelPageInfo: {
       page: channelPage,
@@ -553,6 +869,8 @@ async function parseDiscordExport(rootPath, options = {}) {
   const premiumEvents = []
   const badges = []
   const connections = []
+  const billingTransactions = []
+  const giftedNitro = []
 
   let jsonFiles = []
 
@@ -565,6 +883,9 @@ async function parseDiscordExport(rootPath, options = {}) {
       premiumHistory: [],
       badges: [],
       connections: [],
+      billingTransactions: [],
+      giftedNitro: [],
+      billingSummary: computeBillingSummary([], []),
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -603,6 +924,9 @@ async function parseDiscordExport(rootPath, options = {}) {
     premiumEvents.push(...extractPremiumEventsFromPayload(payload, jsonPath, warnings))
     badges.push(...extractBadgesFromPayload(payload, jsonPath))
     connections.push(...extractConnectionsFromPayload(payload, jsonPath, warnings))
+    const extractedBilling = extractBillingDataFromPayload(payload, jsonPath, warnings)
+    billingTransactions.push(...extractedBilling.transactions)
+    giftedNitro.push(...extractedBilling.giftedNitro)
 
     const messages = maybeExtractMessages(payload, jsonPath, warnings)
     for (const message of messages) {
@@ -645,6 +969,40 @@ async function parseDiscordExport(rootPath, options = {}) {
     ).values(),
   ).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
   const { recentEmojis, favoriteEmojis } = buildEmojiDatasets(messagesByChannel)
+  const dedupedBillingTransactions = Array.from(
+    new Map(
+      billingTransactions.map((entry) => [
+        [
+          entry.date || '',
+          entry.amount ?? '',
+          entry.currency || '',
+          entry.type || '',
+          entry.status || '',
+          entry.description || '',
+          entry.relatedSubscriptionId || '',
+          entry.source || '',
+        ].join('|'),
+        entry,
+      ]),
+    ).values(),
+  ).sort((a, b) => {
+    const aEpoch = a.date ? Date.parse(a.date) : Number.NEGATIVE_INFINITY
+    const bEpoch = b.date ? Date.parse(b.date) : Number.NEGATIVE_INFINITY
+    return bEpoch - aEpoch
+  })
+  const dedupedGiftedNitro = Array.from(
+    new Map(
+      giftedNitro.map((gift) => [
+        [gift.date || '', gift.giftCode || '', gift.relatedSubscriptionId || '', gift.source || ''].join('|'),
+        gift,
+      ]),
+    ).values(),
+  ).sort((a, b) => {
+    const aEpoch = a.date ? Date.parse(a.date) : Number.NEGATIVE_INFINITY
+    const bEpoch = b.date ? Date.parse(b.date) : Number.NEGATIVE_INFINITY
+    return bEpoch - aEpoch
+  })
+  const billingSummary = computeBillingSummary(dedupedBillingTransactions, dedupedGiftedNitro)
 
   return {
     channels,
@@ -654,6 +1012,9 @@ async function parseDiscordExport(rootPath, options = {}) {
     connections: dedupedConnections,
     recentEmojis,
     favoriteEmojis,
+    billingTransactions: dedupedBillingTransactions,
+    giftedNitro: dedupedGiftedNitro,
+    billingSummary,
     warnings,
     sortDirection,
   }
