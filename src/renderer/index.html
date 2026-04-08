@@ -72,6 +72,11 @@
         </section>
 
         <section class="card">
+          <h2 class="card-title">Connections</h2>
+          <div id="connectionsPanel" class="connections-panel"></div>
+        </section>
+
+        <section class="card">
           <h2 class="card-title">Recent Emojis</h2>
           <div id="recentEmojisPanel" class="emoji-panel"></div>
         </section>
@@ -109,6 +114,7 @@
       const statusBadgeEl = document.getElementById('statusBadge')
       const premiumHistoryEl = document.getElementById('premiumHistory')
       const badgePanelEl = document.getElementById('badgePanel')
+      const connectionsPanelEl = document.getElementById('connectionsPanel')
       const recentEmojisPanelEl = document.getElementById('recentEmojisPanel')
       const favoriteEmojisPanelEl = document.getElementById('favoriteEmojisPanel')
       const premiumModeTextEl = document.getElementById('premiumModeText')
@@ -128,6 +134,7 @@
         status: 'idle',
         premiumHistory: [],
         badges: [],
+        connections: [],
         recentEmojis: [],
         favoriteEmojis: [],
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
@@ -381,6 +388,88 @@
           .join('')
       }
 
+      function getConnectionIcon(type) {
+        const icons = {
+          twitch: '🟣',
+          youtube: '▶️',
+          steam: '🎮',
+          reddit: '👽',
+          github: '🐙',
+          spotify: '🎵',
+          twitter: '🐦',
+          x: '🐦',
+          battlenet: '🛡️',
+          riotgames: '🛡️',
+          facebook: '📘',
+          xbox: '🟢',
+          tiktok: '🎬',
+          epicgames: '🎯',
+          unknown: '🔗',
+        }
+
+        return icons[type] || icons.unknown
+      }
+
+      function formatConnectionStatus(connection) {
+        const verifiedLabel =
+          connection.verified === true ? 'Verified' : connection.verified === false ? 'Unverified' : 'Verification unknown'
+        const visibilityLabel = connection.visibility || 'unknown'
+        const linkedLabel = connection.linkedAt ? formatTimestampForDisplay(connection.linkedAt) : 'Unknown'
+        return `${verifiedLabel} • Visibility: ${visibilityLabel} • Linked: ${linkedLabel}`
+      }
+
+      function renderConnections() {
+        if (!state.latestImportId || !state.importMeta?.ok) {
+          connectionsPanelEl.innerHTML = '<div class="muted small">Import a package to view connected accounts.</div>'
+          return
+        }
+
+        if (!Array.isArray(state.connections) || state.connections.length === 0) {
+          connectionsPanelEl.innerHTML =
+            '<div class="muted small">No connected accounts/integrations were found in this export.</div>'
+          return
+        }
+
+        connectionsPanelEl.innerHTML = `
+          <table class="connections-table">
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Account</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.connections
+                .map((connection) => {
+                  const icon = getConnectionIcon(connection.type)
+                  const serviceName = connection.type || 'unknown'
+                  const accountName = connection.name || connection.id || 'Unknown Account'
+                  const accountSecondary = connection.id && connection.id !== 'unknown' ? `ID: ${connection.id}` : null
+                  const status = formatConnectionStatus(connection)
+
+                  return `
+                    <tr>
+                      <td>
+                        <span class="connection-service">
+                          <span class="connection-icon" aria-hidden="true">${escapeHtml(icon)}</span>
+                          <span>${escapeHtml(serviceName)}</span>
+                        </span>
+                      </td>
+                      <td>
+                        <div>${escapeHtml(accountName)}</div>
+                        ${accountSecondary ? `<div class="muted small">${escapeHtml(accountSecondary)}</div>` : ''}
+                      </td>
+                      <td class="muted small">${escapeHtml(status)}</td>
+                    </tr>
+                  `
+                })
+                .join('')}
+            </tbody>
+          </table>
+        `
+      }
+
       function renderChannelList() {
         const visibleChannels = getVisibleChannels()
 
@@ -526,6 +615,7 @@
         renderChannelList()
         renderTimeline()
         renderBadges()
+        renderConnections()
         renderEmojiPanels()
         renderPremiumHistory()
 
@@ -569,6 +659,7 @@
           state.messagesByChannel = {}
           state.premiumHistory = []
           state.badges = []
+          state.connections = []
           state.recentEmojis = []
           state.favoriteEmojis = []
           setStatus('error', 'Error')
@@ -580,6 +671,7 @@
         state.messagesByChannel = parserPage.messagesByChannel || {}
         state.premiumHistory = parserPage.premiumHistory || []
         state.badges = parserPage.badges || []
+        state.connections = parserPage.connections || []
         state.recentEmojis = parserPage.recentEmojis || []
         state.favoriteEmojis = parserPage.favoriteEmojis || []
         if (!state.selectedChannelId && state.channels.length > 0) {

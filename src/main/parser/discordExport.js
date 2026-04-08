@@ -411,6 +411,90 @@ function buildEmojiDatasets(messagesByChannel) {
   return { recentEmojis, favoriteEmojis }
 }
 
+function normalizeConnection(rawConnection, sourcePath, warnings) {
+  if (!rawConnection || typeof rawConnection !== 'object') {
+    return null
+  }
+
+  const type = rawConnection.type ?? rawConnection.service ?? rawConnection.provider
+  const name =
+    rawConnection.name ??
+    rawConnection.username ??
+    rawConnection.display_name ??
+    rawConnection.displayName
+  const id = rawConnection.id ?? rawConnection.account_id ?? rawConnection.accountId
+  const visibility = rawConnection.visibility ?? rawConnection.visibility_type ?? rawConnection.visibilityType
+  const verified = rawConnection.verified ?? rawConnection.is_verified ?? rawConnection.isVerified
+  const linkedAtInput = rawConnection.linked_at ?? rawConnection.linkedAt ?? rawConnection.created_at
+
+  if (!type && !name && !id) {
+    warnings.push(`Skipped malformed connection entry in ${sourcePath}`)
+    return null
+  }
+
+  const linkedAt = parseTimestamp(linkedAtInput)
+  if (linkedAtInput && !linkedAt.value) {
+    warnings.push(`Connection in ${sourcePath} had invalid linkedAt timestamp: ${String(linkedAtInput)}`)
+  }
+
+  return {
+    type: typeof type === 'string' && type.trim() ? type.trim().toLowerCase() : 'unknown',
+    name: typeof name === 'string' && name.trim() ? name.trim() : id ? `Account ${id}` : 'Unknown Account',
+    id: id === undefined || id === null || id === '' ? 'unknown' : String(id),
+    visibility:
+      typeof visibility === 'string' && visibility.trim()
+        ? visibility.trim().toLowerCase()
+        : Number.isFinite(visibility)
+          ? String(visibility)
+          : 'unknown',
+    verified: typeof verified === 'boolean' ? verified : null,
+    linkedAt: linkedAt.value ?? null,
+  }
+}
+
+function extractConnectionsFromPayload(payload, sourcePath, warnings, sink = []) {
+  if (!payload || typeof payload !== 'object') {
+    return sink
+  }
+
+  if (Array.isArray(payload)) {
+    payload.forEach((item) => extractConnectionsFromPayload(item, sourcePath, warnings, sink))
+    return sink
+  }
+
+  const directConnectionCollections = [
+    payload.connections,
+    payload.connected_accounts,
+    payload.connectedAccounts,
+    payload.integrations,
+  ]
+
+  for (const collection of directConnectionCollections) {
+    if (!Array.isArray(collection)) {
+      continue
+    }
+
+    for (const entry of collection) {
+      const normalized = normalizeConnection(entry, sourcePath, warnings)
+      if (normalized) {
+        sink.push(normalized)
+      }
+    }
+  }
+
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'connections' || key === 'connected_accounts' || key === 'connectedAccounts') {
+      continue
+    }
+
+    if (value && typeof value === 'object') {
+      extractConnectionsFromPayload(value, sourcePath, warnings, sink)
+    }
+  }
+
+  return sink
+}
+
 function getPaginatedParserOutput(parsedExport, options = {}) {
   const channelPage = Math.max(1, Number(options.channelPage) || 1)
   const channelPageSize = Math.max(1, Number(options.channelPageSize) || 25)
@@ -447,6 +531,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
     messagesByChannel,
     premiumHistory: parsedExport.premiumHistory ?? [],
     badges: parsedExport.badges ?? [],
+    connections: parsedExport.connections ?? [],
     recentEmojis: parsedExport.recentEmojis ?? [],
     favoriteEmojis: parsedExport.favoriteEmojis ?? [],
     warnings: parsedExport.warnings,
@@ -467,6 +552,7 @@ async function parseDiscordExport(rootPath, options = {}) {
   const sortDirection = normalizeSortDirection(options.sortDirection)
   const premiumEvents = []
   const badges = []
+  const connections = []
 
   let jsonFiles = []
 
@@ -478,6 +564,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       messagesByChannel: {},
       premiumHistory: [],
       badges: [],
+      connections: [],
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -515,6 +602,7 @@ async function parseDiscordExport(rootPath, options = {}) {
 
     premiumEvents.push(...extractPremiumEventsFromPayload(payload, jsonPath, warnings))
     badges.push(...extractBadgesFromPayload(payload, jsonPath))
+    connections.push(...extractConnectionsFromPayload(payload, jsonPath, warnings))
 
     const messages = maybeExtractMessages(payload, jsonPath, warnings)
     for (const message of messages) {
@@ -548,6 +636,14 @@ async function parseDiscordExport(rootPath, options = {}) {
       ]),
     ).values(),
   ).sort((a, b) => a.displayName.localeCompare(b.displayName))
+  const dedupedConnections = Array.from(
+    new Map(
+      connections.map((connection) => [
+        `${connection.type}:${connection.id}:${connection.name}`,
+        connection,
+      ]),
+    ).values(),
+  ).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
   const { recentEmojis, favoriteEmojis } = buildEmojiDatasets(messagesByChannel)
 
   return {
@@ -555,6 +651,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     messagesByChannel,
     premiumHistory,
     badges: dedupedBadges,
+    connections: dedupedConnections,
     recentEmojis,
     favoriteEmojis,
     warnings,
