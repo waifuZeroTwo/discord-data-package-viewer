@@ -90,6 +90,88 @@ function normalizeAttachments(rawMessage) {
     .filter(Boolean)
 }
 
+function extractCustomEmojiMatches(text) {
+  if (typeof text !== 'string' || text.length === 0) {
+    return []
+  }
+
+  const matches = []
+  const pattern = /<(?<animated>a?):(?<name>[a-zA-Z0-9_~]+):(?<id>\d+)>/g
+  for (const match of text.matchAll(pattern)) {
+    const groups = match.groups || {}
+    matches.push({
+      type: 'custom',
+      name: groups.name || 'emoji',
+      customId: groups.id || null,
+      animated: groups.animated === 'a',
+      raw: match[0],
+      count: 1,
+    })
+  }
+
+  return matches
+}
+
+function extractUnicodeEmojiMatches(text) {
+  if (typeof text !== 'string' || text.length === 0) {
+    return []
+  }
+
+  const matches = []
+  const pattern =
+    /(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?)(?:\u200D(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?))*)/gu
+  for (const match of text.matchAll(pattern)) {
+    matches.push({
+      type: 'unicode',
+      unicode: match[0],
+      raw: match[0],
+      count: 1,
+    })
+  }
+
+  return matches
+}
+
+function normalizeReactions(rawMessage) {
+  const collection = rawMessage.reactions ?? []
+  if (!Array.isArray(collection)) {
+    return []
+  }
+
+  return collection
+    .map((reaction) => {
+      if (!reaction || typeof reaction !== 'object') {
+        return null
+      }
+
+      const emoji = reaction.emoji && typeof reaction.emoji === 'object' ? reaction.emoji : reaction
+      const count = Number.isFinite(reaction.count) ? Math.max(1, reaction.count) : 1
+      const customId = emoji.id ? String(emoji.id) : null
+      const unicode = !customId && typeof emoji.name === 'string' ? emoji.name : null
+      const name = typeof emoji.name === 'string' && emoji.name ? emoji.name : 'emoji'
+
+      return {
+        type: customId ? 'custom' : 'unicode',
+        name,
+        customId,
+        unicode,
+        animated: Boolean(emoji.animated),
+        raw: customId ? `<${emoji.animated ? 'a' : ''}:${name}:${customId}>` : unicode ?? name,
+        count,
+      }
+    })
+    .filter(Boolean)
+}
+
+function extractEmojiUsage(rawMessage) {
+  const content = typeof rawMessage.content === 'string' ? rawMessage.content : ''
+  return [
+    ...extractCustomEmojiMatches(content),
+    ...extractUnicodeEmojiMatches(content),
+    ...normalizeReactions(rawMessage),
+  ]
+}
+
 function normalizeMessage(rawMessage, sourcePath, warnings) {
   if (!rawMessage || typeof rawMessage !== 'object') {
     return null
@@ -123,6 +205,7 @@ function normalizeMessage(rawMessage, sourcePath, warnings) {
     timestamp: timestamp.value,
     timestampEpochMs: timestamp.epochMs,
     attachments: normalizeAttachments(rawMessage),
+    emojiUsage: extractEmojiUsage(rawMessage),
   }
 }
 
@@ -249,6 +332,85 @@ function extractBadgesFromPayload(payload, jsonPath) {
   return badges.map((badge) => ({ ...badge, source: jsonPath }))
 }
 
+function getEmojiAssetUrl(item) {
+  if (item.type !== 'custom' || !item.customId) {
+    return null
+  }
+
+  const extension = item.animated ? 'gif' : 'png'
+  return `https://cdn.discordapp.com/emojis/${item.customId}.${extension}?size=64&quality=lossless`
+}
+
+function buildEmojiDatasets(messagesByChannel) {
+  const index = new Map()
+
+  for (const [channelId, messages] of Object.entries(messagesByChannel)) {
+    for (const message of messages) {
+      if (!Array.isArray(message.emojiUsage)) {
+        continue
+      }
+
+      for (const usage of message.emojiUsage) {
+        const key =
+          usage.type === 'custom' && usage.customId
+            ? `custom:${usage.customId}`
+            : `unicode:${usage.unicode || usage.raw || 'unknown'}`
+        const existing =
+          index.get(key) ||
+          {
+            key,
+            type: usage.type,
+            name: usage.name || usage.unicode || usage.raw || 'emoji',
+            unicode: usage.unicode || null,
+            customId: usage.customId || null,
+            animated: Boolean(usage.animated),
+            raw: usage.raw || '',
+            totalUses: 0,
+            lastUsedTimestamp: null,
+            lastUsedEpochMs: Number.NaN,
+            channelIds: new Set(),
+          }
+
+        existing.totalUses += Number.isFinite(usage.count) ? usage.count : 1
+        existing.channelIds.add(channelId)
+
+        if (!Number.isNaN(message.timestampEpochMs)) {
+          if (Number.isNaN(existing.lastUsedEpochMs) || message.timestampEpochMs > existing.lastUsedEpochMs) {
+            existing.lastUsedEpochMs = message.timestampEpochMs
+            existing.lastUsedTimestamp = message.timestamp
+          }
+        }
+
+        index.set(key, existing)
+      }
+    }
+  }
+
+  const normalized = Array.from(index.values()).map((item) => ({
+    key: item.key,
+    type: item.type,
+    name: item.name,
+    unicode: item.unicode,
+    customId: item.customId,
+    animated: item.animated,
+    raw: item.raw,
+    totalUses: item.totalUses,
+    lastUsedTimestamp: item.lastUsedTimestamp,
+    channelCount: item.channelIds.size,
+    assetUrl: getEmojiAssetUrl(item),
+  }))
+
+  const recentEmojis = [...normalized].sort((a, b) => {
+    const aEpoch = a.lastUsedTimestamp ? Date.parse(a.lastUsedTimestamp) : Number.NEGATIVE_INFINITY
+    const bEpoch = b.lastUsedTimestamp ? Date.parse(b.lastUsedTimestamp) : Number.NEGATIVE_INFINITY
+    return bEpoch - aEpoch || b.totalUses - a.totalUses
+  })
+
+  const favoriteEmojis = [...normalized].sort((a, b) => b.totalUses - a.totalUses || a.name.localeCompare(b.name))
+
+  return { recentEmojis, favoriteEmojis }
+}
+
 function getPaginatedParserOutput(parsedExport, options = {}) {
   const channelPage = Math.max(1, Number(options.channelPage) || 1)
   const channelPageSize = Math.max(1, Number(options.channelPageSize) || 25)
@@ -285,6 +447,8 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
     messagesByChannel,
     premiumHistory: parsedExport.premiumHistory ?? [],
     badges: parsedExport.badges ?? [],
+    recentEmojis: parsedExport.recentEmojis ?? [],
+    favoriteEmojis: parsedExport.favoriteEmojis ?? [],
     warnings: parsedExport.warnings,
     channelPageInfo: {
       page: channelPage,
@@ -384,12 +548,15 @@ async function parseDiscordExport(rootPath, options = {}) {
       ]),
     ).values(),
   ).sort((a, b) => a.displayName.localeCompare(b.displayName))
+  const { recentEmojis, favoriteEmojis } = buildEmojiDatasets(messagesByChannel)
 
   return {
     channels,
     messagesByChannel,
     premiumHistory,
     badges: dedupedBadges,
+    recentEmojis,
+    favoriteEmojis,
     warnings,
     sortDirection,
   }
