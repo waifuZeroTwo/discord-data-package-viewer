@@ -7,9 +7,42 @@ const {
 const { mapLegacyBadge, mapPremiumType, mapPublicFlags } = require('../../shared/badges')
 
 const DEFAULT_SORT_DIRECTION = 'asc'
+const PANEL_KEYS = ['premium', 'badges', 'emojis', 'connections', 'billing']
 
 function normalizeSortDirection(sortDirection) {
   return sortDirection === 'desc' ? 'desc' : DEFAULT_SORT_DIRECTION
+}
+
+function createPanelMetadata() {
+  const metadata = {}
+
+  for (const key of PANEL_KEYS) {
+    metadata[key] = {
+      sourcePaths: new Set(),
+      warnings: [],
+      recordCount: 0,
+    }
+  }
+
+  return metadata
+}
+
+function createWarningCollector(globalWarnings, panelMetadata, panelKey) {
+  return {
+    push(message) {
+      globalWarnings.push(message)
+      if (panelMetadata[panelKey]) {
+        panelMetadata[panelKey].warnings.push(message)
+      }
+    },
+  }
+}
+
+function pushPanelWarning(globalWarnings, panelMetadata, panelKey, message) {
+  globalWarnings.push(message)
+  if (panelMetadata[panelKey]) {
+    panelMetadata[panelKey].warnings.push(message)
+  }
 }
 
 async function collectJsonFiles(rootPath) {
@@ -302,7 +335,7 @@ function extractBadgeCandidates(payload, jsonPath, sink = []) {
   return sink
 }
 
-function extractBadgesFromPayload(payload, jsonPath) {
+function extractBadgesFromPayload(payload, jsonPath, warnings) {
   const badgeCandidates = extractBadgeCandidates(payload, jsonPath)
   const badges = []
 
@@ -324,6 +357,8 @@ function extractBadgesFromPayload(payload, jsonPath) {
         const mapped = mapLegacyBadge(rawValue)
         if (mapped) {
           badges.push(mapped)
+        } else if (rawValue !== undefined && rawValue !== null && rawValue !== '') {
+          warnings.push(`Skipped unrecognized badge value "${String(rawValue)}" in ${jsonPath}`)
         }
       }
     }
@@ -850,6 +885,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
       giftedNitroValueReceived: 0,
       summaryCurrency: null,
     },
+    parserMetadata: parsedExport.parserMetadata ?? {},
     warnings: parsedExport.warnings,
     channelPageInfo: {
       page: channelPage,
@@ -863,6 +899,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
 
 async function parseDiscordExport(rootPath, options = {}) {
   const warnings = []
+  const panelMetadata = createPanelMetadata()
   const channelsById = new Map()
   const messagesByChannel = {}
   const sortDirection = normalizeSortDirection(options.sortDirection)
@@ -886,6 +923,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       billingTransactions: [],
       giftedNitro: [],
       billingSummary: computeBillingSummary([], []),
+      parserMetadata: {},
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -921,10 +959,45 @@ async function parseDiscordExport(rootPath, options = {}) {
       }
     }
 
-    premiumEvents.push(...extractPremiumEventsFromPayload(payload, jsonPath, warnings))
-    badges.push(...extractBadgesFromPayload(payload, jsonPath))
-    connections.push(...extractConnectionsFromPayload(payload, jsonPath, warnings))
-    const extractedBilling = extractBillingDataFromPayload(payload, jsonPath, warnings)
+    const premiumWarningCollector = createWarningCollector(warnings, panelMetadata, 'premium')
+    const connectionsWarningCollector = createWarningCollector(warnings, panelMetadata, 'connections')
+    const billingWarningCollector = createWarningCollector(warnings, panelMetadata, 'billing')
+    const badgeWarningCollector = createWarningCollector(warnings, panelMetadata, 'badges')
+
+    const extractedPremiumEvents = extractPremiumEventsFromPayload(
+      payload,
+      jsonPath,
+      premiumWarningCollector,
+    )
+    if (extractedPremiumEvents.length > 0) {
+      panelMetadata.premium.sourcePaths.add(jsonPath)
+      premiumEvents.push(...extractedPremiumEvents)
+    }
+
+    const extractedBadges = extractBadgesFromPayload(payload, jsonPath, badgeWarningCollector)
+    if (extractedBadges.length > 0) {
+      panelMetadata.badges.sourcePaths.add(jsonPath)
+      badges.push(...extractedBadges)
+    }
+
+    const extractedConnections = extractConnectionsFromPayload(
+      payload,
+      jsonPath,
+      connectionsWarningCollector,
+    )
+    if (extractedConnections.length > 0) {
+      panelMetadata.connections.sourcePaths.add(jsonPath)
+      connections.push(...extractedConnections)
+    }
+
+    const extractedBilling = extractBillingDataFromPayload(
+      payload,
+      jsonPath,
+      billingWarningCollector,
+    )
+    if (extractedBilling.transactions.length > 0 || extractedBilling.giftedNitro.length > 0) {
+      panelMetadata.billing.sourcePaths.add(jsonPath)
+    }
     billingTransactions.push(...extractedBilling.transactions)
     giftedNitro.push(...extractedBilling.giftedNitro)
 
@@ -943,6 +1016,9 @@ async function parseDiscordExport(rootPath, options = {}) {
       }
 
       messagesByChannel[message.channelId].push(message)
+      if (Array.isArray(message.emojiUsage) && message.emojiUsage.length > 0) {
+        panelMetadata.emojis.sourcePaths.add(jsonPath)
+      }
     }
   }
 
@@ -1004,6 +1080,39 @@ async function parseDiscordExport(rootPath, options = {}) {
   })
   const billingSummary = computeBillingSummary(dedupedBillingTransactions, dedupedGiftedNitro)
 
+  panelMetadata.premium.recordCount = premiumHistory.length
+  panelMetadata.badges.recordCount = dedupedBadges.length
+  panelMetadata.emojis.recordCount = recentEmojis.length
+  panelMetadata.connections.recordCount = dedupedConnections.length
+  panelMetadata.billing.recordCount = dedupedBillingTransactions.length
+
+  for (const interval of premiumHistory) {
+    if (interval.source) {
+      const [sourcePath] = String(interval.source).split(':')
+      if (sourcePath) {
+        panelMetadata.premium.sourcePaths.add(sourcePath)
+      }
+    }
+  }
+
+  if (premiumEvents.length > 0 && premiumHistory.length === 0) {
+    pushPanelWarning(
+      warnings,
+      panelMetadata,
+      'premium',
+      'Premium entries were detected but none could be normalized into displayable intervals.',
+    )
+  }
+
+  const parserMetadata = {}
+  for (const panelKey of PANEL_KEYS) {
+    parserMetadata[panelKey] = {
+      sourcePaths: Array.from(panelMetadata[panelKey].sourcePaths).sort(),
+      recordCount: panelMetadata[panelKey].recordCount,
+      warnings: panelMetadata[panelKey].warnings,
+    }
+  }
+
   return {
     channels,
     messagesByChannel,
@@ -1015,6 +1124,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     billingTransactions: dedupedBillingTransactions,
     giftedNitro: dedupedGiftedNitro,
     billingSummary,
+    parserMetadata,
     warnings,
     sortDirection,
   }

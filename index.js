@@ -10,6 +10,7 @@ const {
 const IMPORTS_SUBDIR = 'imports'
 const IMPORT_RETENTION_MS = 1000 * 60 * 60 * 24 * 7
 const IMPORT_MAX_COUNT = 10
+const PARSER_DEBUG_LOG = 'parser-debug.log'
 const parsedArchiveCache = new Map()
 
 const KNOWN_SECTION_DETECTORS = [
@@ -169,14 +170,21 @@ async function handleSelectZip() {
   }
 
   const detectedSections = await detectSections(rootPath)
+  const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
+  const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
 
   if (detectedSections.length === 0) {
     warnings.push(
-      'No known Discord data sections were detected (expected directories like messages or account).',
+      'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
+    )
+  } else if (missingSections.length > 0) {
+    warnings.push(
+      `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
     )
   }
 
   const parsedExport = await parseDiscordExport(rootPath, { sortDirection: 'asc' })
+  await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
   parsedArchiveCache.set(importId, parsedExport)
 
   const messageCount = Object.values(parsedExport.messagesByChannel).reduce(
@@ -185,16 +193,37 @@ async function handleSelectZip() {
   )
 
   return {
-    ok: detectedSections.length > 0,
+    ok: true,
     importId,
     rootPath,
     warnings: [...warnings, ...parsedExport.warnings],
     detectedSections,
+    missingSections,
     parserSummary: {
       channelCount: parsedExport.channels.length,
       messageCount,
       sortDirection: parsedExport.sortDirection,
     },
+  }
+}
+
+async function appendParserDebugLog(importId, warningMessages) {
+  if (!Array.isArray(warningMessages) || warningMessages.length === 0) {
+    return
+  }
+
+  const logPath = path.join(app.getPath('userData'), PARSER_DEBUG_LOG)
+  const timestamp = new Date().toISOString()
+  const lines = [
+    `=== ${timestamp} import:${importId} ===`,
+    ...warningMessages.map((message) => `WARN ${message}`),
+    '',
+  ]
+
+  try {
+    await fs.appendFile(logPath, `${lines.join('\n')}\n`, 'utf8')
+  } catch (error) {
+    console.warn(`Failed to write parser debug log at ${logPath}:`, error)
   }
 }
 

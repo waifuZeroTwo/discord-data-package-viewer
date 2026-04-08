@@ -63,22 +63,26 @@
         <section class="card">
           <h2 id="timelineTitle" class="card-title">Message Timeline</h2>
           <p id="importStatus" class="muted small">No package selected.</p>
+          <div id="nonBlockingWarnings" class="inline-warning-list"></div>
           <div id="timeline" class="timeline"></div>
         </section>
 
         <section class="card">
           <h2 class="card-title">Badges</h2>
           <div id="badgePanel" class="badge-panel"></div>
+          <div id="badgeDetails"></div>
         </section>
 
         <section class="card">
           <h2 class="card-title">Connections</h2>
           <div id="connectionsPanel" class="connections-panel"></div>
+          <div id="connectionsDetails"></div>
         </section>
 
         <section class="card">
           <h2 class="card-title">Recent Emojis</h2>
           <div id="recentEmojisPanel" class="emoji-panel"></div>
+          <div id="emojiDetails"></div>
         </section>
 
         <section class="card">
@@ -106,6 +110,7 @@
           <div id="billingTransactionsPanel" class="billing-table-wrap"></div>
           <h3 class="card-title">Gifted Nitro Received</h3>
           <div id="giftedNitroPanel" class="billing-gift-list"></div>
+          <div id="billingDetails"></div>
         </section>
 
         <section class="card">
@@ -117,6 +122,7 @@
             </div>
           </div>
           <div id="premiumHistory" class="premium-history"></div>
+          <div id="premiumDetails"></div>
         </section>
       </main>
     </div>
@@ -134,6 +140,7 @@
       const timelineEl = document.getElementById('timeline')
       const timelineTitleEl = document.getElementById('timelineTitle')
       const statusBadgeEl = document.getElementById('statusBadge')
+      const nonBlockingWarningsEl = document.getElementById('nonBlockingWarnings')
       const premiumHistoryEl = document.getElementById('premiumHistory')
       const badgePanelEl = document.getElementById('badgePanel')
       const connectionsPanelEl = document.getElementById('connectionsPanel')
@@ -146,6 +153,11 @@
       const giftedNitroPanelEl = document.getElementById('giftedNitroPanel')
       const billingTypeFilterEl = document.getElementById('billingTypeFilter')
       const billingStatusFilterEl = document.getElementById('billingStatusFilter')
+      const badgeDetailsEl = document.getElementById('badgeDetails')
+      const connectionsDetailsEl = document.getElementById('connectionsDetails')
+      const emojiDetailsEl = document.getElementById('emojiDetails')
+      const billingDetailsEl = document.getElementById('billingDetails')
+      const premiumDetailsEl = document.getElementById('premiumDetails')
 
       const versions = window.ddpApi.getRuntimeVersions()
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
@@ -175,6 +187,7 @@
           giftedNitroValueReceived: 0,
           summaryCurrency: null,
         },
+        parserMetadata: {},
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -403,6 +416,34 @@
         renderPremiumHistoryText()
       }
 
+      function renderPanelDataDetails(targetElement, title, metadata) {
+        if (!targetElement) {
+          return
+        }
+
+        const sourcePaths = metadata?.sourcePaths || []
+        const warnings = metadata?.warnings || []
+        const recordCount = Number.isFinite(metadata?.recordCount) ? metadata.recordCount : 0
+
+        targetElement.innerHTML = `
+          <details class="data-details">
+            <summary>Data details</summary>
+            <div class="data-details-body">
+              <div><strong>${escapeHtml(title)} records:</strong> ${escapeHtml(String(recordCount))}</div>
+              <div><strong>Source files:</strong> ${sourcePaths.length ? escapeHtml(sourcePaths.join(', ')) : 'None detected'}</div>
+              <div><strong>Skipped/invalid warnings:</strong></div>
+              <ul>
+                ${
+                  warnings.length
+                    ? warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')
+                    : '<li>No warnings for this panel.</li>'
+                }
+              </ul>
+            </div>
+          </details>
+        `
+      }
+
       function getBadgeIcon(iconKey) {
         const icons = {
           staff: '🛡️',
@@ -449,6 +490,8 @@
             </span>`
           })
           .join('')
+
+        renderPanelDataDetails(badgeDetailsEl, 'Badges', state.parserMetadata.badges)
       }
 
       function getConnectionIcon(type) {
@@ -531,6 +574,8 @@
             </tbody>
           </table>
         `
+
+        renderPanelDataDetails(connectionsDetailsEl, 'Connections', state.parserMetadata.connections)
       }
 
       function renderChannelList() {
@@ -602,6 +647,8 @@
         } else {
           favoriteEmojisPanelEl.innerHTML = state.favoriteEmojis.map(renderEmojiChip).join('')
         }
+
+        renderPanelDataDetails(emojiDetailsEl, 'Emojis', state.parserMetadata.emojis)
       }
 
       function getFilteredBillingTransactions() {
@@ -735,6 +782,8 @@
             })
             .join('')}</ul>`
         }
+
+        renderPanelDataDetails(billingDetailsEl, 'Billing', state.parserMetadata.billing)
       }
 
       function renderTimeline() {
@@ -815,9 +864,27 @@
         renderEmojiPanels()
         renderBilling()
         renderPremiumHistory()
+        renderPanelDataDetails(badgeDetailsEl, 'Badges', state.parserMetadata.badges)
+        renderPanelDataDetails(connectionsDetailsEl, 'Connections', state.parserMetadata.connections)
+        renderPanelDataDetails(emojiDetailsEl, 'Emojis', state.parserMetadata.emojis)
+        renderPanelDataDetails(billingDetailsEl, 'Billing', state.parserMetadata.billing)
+        renderPanelDataDetails(premiumDetailsEl, 'Premium', state.parserMetadata.premium)
 
         if (state.importMeta?.warnings?.length) {
           importStatusEl.textContent = state.importMeta.warnings.join(' | ')
+        }
+
+        const missingSections = state.importMeta?.missingSections || []
+        if (!missingSections.length) {
+          nonBlockingWarningsEl.innerHTML = ''
+        } else {
+          nonBlockingWarningsEl.innerHTML = `
+            <div class="inline-warning">
+              Partial results: expected export sections were missing (${escapeHtml(
+                missingSections.join(', '),
+              )}). Parsed data is still shown where available.
+            </div>
+          `
         }
       }
 
@@ -870,6 +937,7 @@
             giftedNitroValueReceived: 0,
             summaryCurrency: null,
           }
+          state.parserMetadata = {}
           setStatus('error', 'Error')
           render()
           return
@@ -885,6 +953,7 @@
         state.billingTransactions = parserPage.billingTransactions || []
         state.giftedNitro = parserPage.giftedNitro || []
         state.billingSummary = parserPage.billingSummary || state.billingSummary
+        state.parserMetadata = parserPage.parserMetadata || {}
         if (!state.selectedChannelId && state.channels.length > 0) {
           state.selectedChannelId = state.channels[0].id
         }
@@ -942,6 +1011,7 @@
         state.latestImportId = importResult.importId
         state.importMeta = importResult
         state.selectedChannelId = ''
+        state.parserMetadata = {}
 
         if (!importResult.ok) {
           setStatus('error', 'Error')
