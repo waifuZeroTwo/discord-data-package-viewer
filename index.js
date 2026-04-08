@@ -336,13 +336,17 @@ async function extractZipWithProgress(zipPath, outputDir, onProgress) {
 
 async function handleSelectZip(event, payload = {}) {
   const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  console.debug('[ddp][main] dialog:select-zip invoke:start', {
+    importId,
+    hasZipPath: typeof payload.zipPath === 'string' && payload.zipPath.trim().length > 0,
+  })
   if (activeImportRequest && activeImportRequest !== importId) {
     emitImportStatus(event, {
       importId,
       state: IMPORT_STATES.FAILED,
       message: `Another import (${activeImportRequest}) is already running.`,
     })
-    return {
+    const busyResponse = {
       ok: false,
       importId,
       busy: true,
@@ -353,6 +357,8 @@ async function handleSelectZip(event, payload = {}) {
         messageCount: 0,
       },
     }
+    console.debug('[ddp][main] dialog:select-zip invoke:result', busyResponse)
+    return busyResponse
   }
 
   activeImportRequest = importId
@@ -379,7 +385,19 @@ async function handleSelectZip(event, payload = {}) {
           state: IMPORT_STATES.CANCELED,
           message: 'Import canceled before file selection.',
         })
-        return null
+        const canceledResponse = {
+          ok: false,
+          canceled: true,
+          importId,
+          warnings: ['Import canceled before selecting a ZIP file.'],
+          detectedSections: [],
+          parserSummary: {
+            channelCount: 0,
+            messageCount: 0,
+          },
+        }
+        console.debug('[ddp][main] dialog:select-zip invoke:result', canceledResponse)
+        return canceledResponse
       }
       selectedZipPath = filePaths[0]
     }
@@ -525,7 +543,7 @@ async function handleSelectZip(event, payload = {}) {
         state: IMPORT_STATES.COMPLETED,
         message: 'Import completed successfully.',
       })
-      return {
+      const successResponse = {
         ok: true,
         importId,
         importHash,
@@ -541,6 +559,11 @@ async function handleSelectZip(event, payload = {}) {
           sortDirection: parsedExport.sortDirection,
         },
       }
+      console.debug('[ddp][main] dialog:select-zip invoke:result', {
+        ...successResponse,
+        warnings: successResponse.warnings?.length ?? 0,
+      })
+      return successResponse
     } catch (error) {
       if (error?.name === 'AbortError') {
         await fs.rm(rootPath, { recursive: true, force: true })
@@ -549,7 +572,7 @@ async function handleSelectZip(event, payload = {}) {
           state: IMPORT_STATES.CANCELED,
           message: 'Import canceled by user.',
         })
-        return {
+        const canceledResponse = {
           ok: false,
           canceled: true,
           importId,
@@ -564,6 +587,8 @@ async function handleSelectZip(event, payload = {}) {
             messageCount: 0,
           },
         }
+        console.debug('[ddp][main] dialog:select-zip invoke:result', canceledResponse)
+        return canceledResponse
       }
       throw error
     } finally {
@@ -576,7 +601,7 @@ async function handleSelectZip(event, payload = {}) {
       state: IMPORT_STATES.FAILED,
       message: `Import failed: ${error.message}`,
     })
-    return {
+    const errorResponse = {
       ok: false,
       importId,
       warnings: [`Import failed: ${error.message}`],
@@ -586,6 +611,8 @@ async function handleSelectZip(event, payload = {}) {
         messageCount: 0,
       },
     }
+    console.debug('[ddp][main] dialog:select-zip invoke:result', errorResponse)
+    return errorResponse
   } finally {
     if (activeImportRequest === importId) {
       activeImportRequest = null
