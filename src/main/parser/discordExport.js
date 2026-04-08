@@ -67,6 +67,22 @@ async function collectJsonFiles(rootPath) {
   return files
 }
 
+function createAbortError() {
+  const error = new Error('Parser job cancelled.')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw createAbortError()
+  }
+}
+
+async function yieldToEventLoop() {
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
 function normalizeChannel(rawChannel, sourcePath, warnings) {
   if (!rawChannel || typeof rawChannel !== 'object') {
     return null
@@ -333,6 +349,40 @@ function maybeExtractMessages(payload, sourcePath, warnings) {
   }
 
   return messageCandidates.map((item) => normalizeMessage(item, sourcePath, warnings)).filter(Boolean)
+}
+
+async function processMessagesFromPayload(payload, sourcePath, warnings, onMessage, options = {}) {
+  const chunkSize = Number.isFinite(options.chunkSize) ? Math.max(100, options.chunkSize) : 500
+  const signal = options.signal
+  const messageCandidates = []
+
+  if (Array.isArray(payload)) {
+    messageCandidates.push(...payload)
+  } else if (payload && typeof payload === 'object') {
+    if (Array.isArray(payload.messages)) {
+      messageCandidates.push(...payload.messages)
+    }
+
+    if (payload.message && typeof payload.message === 'object') {
+      messageCandidates.push(payload.message)
+    }
+  }
+
+  let processed = 0
+  for (const candidate of messageCandidates) {
+    throwIfAborted(signal)
+    const message = normalizeMessage(candidate, sourcePath, warnings)
+    if (message) {
+      onMessage(message)
+      processed += 1
+    }
+
+    if (processed > 0 && processed % chunkSize === 0) {
+      await yieldToEventLoop()
+    }
+  }
+
+  return processed
 }
 
 function sortMessages(messages, sortDirection) {
@@ -923,12 +973,42 @@ async function parseDiscordExport(rootPath, options = {}) {
   const connections = []
   const billingTransactions = []
   const giftedNitro = []
+  const signal = options.signal
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
+  const parseStartedAt = Date.now()
+  let filesScanned = 0
+  let recordsProcessed = 0
+
+  function emitProgress(stage, currentPath = null) {
+    if (!onProgress) {
+      return
+    }
+
+    const elapsedMs = Math.max(1, Date.now() - parseStartedAt)
+    const totalFiles = jsonFiles.length
+    const ratio = totalFiles > 0 ? filesScanned / totalFiles : 0
+    const etaMs = ratio > 0 ? Math.max(0, Math.round((elapsedMs / ratio) * (1 - ratio))) : null
+    onProgress({
+      stage,
+      filesScanned,
+      totalFiles,
+      recordsProcessed,
+      currentPath,
+      etaSeconds: Number.isFinite(etaMs) ? Math.round(etaMs / 1000) : null,
+      elapsedMs,
+    })
+  }
 
   let jsonFiles = []
 
   try {
+    throwIfAborted(signal)
     jsonFiles = await collectJsonFiles(rootPath)
   } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw error
+    }
+
     return {
       premiumHistory: [],
       badges: [],
@@ -951,7 +1031,10 @@ async function parseDiscordExport(rootPath, options = {}) {
     warnings.push('No JSON files were found in the extracted archive.')
   }
 
+  emitProgress('scanning')
+
   for (const jsonPath of jsonFiles) {
+    throwIfAborted(signal)
     let rawContent = null
 
     try {
@@ -987,12 +1070,14 @@ async function parseDiscordExport(rootPath, options = {}) {
     if (extractedPremiumEvents.length > 0) {
       panelMetadata.premium.sourcePaths.add(jsonPath)
       premiumEvents.push(...extractedPremiumEvents)
+      recordsProcessed += extractedPremiumEvents.length
     }
 
     const extractedBadges = extractBadgesFromPayload(payload, jsonPath, badgeWarningCollector)
     if (extractedBadges.length > 0) {
       panelMetadata.badges.sourcePaths.add(jsonPath)
       badges.push(...extractedBadges)
+      recordsProcessed += extractedBadges.length
     }
 
     const extractedConnections = extractConnectionsFromPayload(
@@ -1003,6 +1088,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     if (extractedConnections.length > 0) {
       panelMetadata.connections.sourcePaths.add(jsonPath)
       connections.push(...extractedConnections)
+      recordsProcessed += extractedConnections.length
     }
 
     const extractedBilling = extractBillingDataFromPayload(
@@ -1015,23 +1101,36 @@ async function parseDiscordExport(rootPath, options = {}) {
     }
     billingTransactions.push(...extractedBilling.transactions)
     giftedNitro.push(...extractedBilling.giftedNitro)
+    recordsProcessed += extractedBilling.transactions.length + extractedBilling.giftedNitro.length
 
-    const messages = maybeExtractMessages(payload, jsonPath, warnings)
-    for (const message of messages) {
-      if (!channelsById.has(message.channelId)) {
-        channelsById.set(message.channelId, {
-          id: message.channelId,
-          name: `Channel ${message.channelId}`,
-          type: 'unknown',
-        })
-      }
+    const messageCountForFile = await processMessagesFromPayload(
+      payload,
+      jsonPath,
+      warnings,
+      (message) => {
+        if (!channelsById.has(message.channelId)) {
+          channelsById.set(message.channelId, {
+            id: message.channelId,
+            name: `Channel ${message.channelId}`,
+            type: 'unknown',
+          })
+        }
 
-      analyticsIndexer.ingestMessage(message)
-      if (Array.isArray(message.emojiUsage) && message.emojiUsage.length > 0) {
-        panelMetadata.emojis.sourcePaths.add(jsonPath)
-      }
-    }
+        analyticsIndexer.ingestMessage(message)
+        if (Array.isArray(message.emojiUsage) && message.emojiUsage.length > 0) {
+          panelMetadata.emojis.sourcePaths.add(jsonPath)
+        }
+      },
+      { signal, chunkSize: 500 },
+    )
+    recordsProcessed += messageCountForFile
+
+    filesScanned += 1
+    emitProgress('parsing', jsonPath)
+    await yieldToEventLoop()
   }
+
+  emitProgress('finalizing')
 
   const channels = Array.from(channelsById.values()).sort((a, b) => a.name.localeCompare(b.name))
   const premiumHistory = normalizePremiumEventsToIntervals(premiumEvents, warnings)
@@ -1122,6 +1221,8 @@ async function parseDiscordExport(rootPath, options = {}) {
   }
 
   const messageCount = analyticsIndexer.getMessageCount()
+
+  emitProgress('complete')
 
   return {
     premiumHistory,

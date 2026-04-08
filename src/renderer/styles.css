@@ -73,6 +73,17 @@ body {
   background: var(--accent-strong);
 }
 
+.button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.button-secondary {
+  border-color: var(--border);
+  background: var(--surface-elevated);
+  color: var(--text);
+}
+
 .status-badge {
   border-radius: 999px;
   padding: 6px 10px;
@@ -466,6 +477,32 @@ select {
   border-radius: 10px;
   background: var(--surface-elevated);
   padding: 10px;
+}
+
+.skeleton-card {
+  min-height: 120px;
+}
+
+.skeleton-line {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #25324a 25%, #2f3f5e 37%, #25324a 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.5s infinite;
+  margin-bottom: 10px;
+}
+
+.skeleton-line.short {
+  width: 55%;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
 }
 
 .analytics-kpi-grid {

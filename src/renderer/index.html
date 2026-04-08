@@ -15,6 +15,7 @@
       <h1 class="header-title">Discord Analytics Dashboard</h1>
       <div class="top-actions">
         <button id="selectPackageButton" class="button" type="button">Import ZIP</button>
+        <button id="cancelImportButton" class="button button-secondary" type="button" disabled>Cancel</button>
         <span id="statusBadge" class="status-badge status-idle">Idle</span>
         <span id="versions" class="muted small"></span>
       </div>
@@ -113,6 +114,7 @@
       const versionsEl = document.getElementById('versions')
       const importStatusEl = document.getElementById('importStatus')
       const selectPackageButton = document.getElementById('selectPackageButton')
+      const cancelImportButton = document.getElementById('cancelImportButton')
       const channelListEl = document.getElementById('channelList')
       const timelineEl = document.getElementById('timeline')
       const timelineTitleEl = document.getElementById('timelineTitle')
@@ -168,6 +170,8 @@
           channelCount: 0,
           messageCount: 0,
         },
+        parserProgress: null,
+        isParsing: false,
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -183,6 +187,9 @@
         state.status = status
         statusBadgeEl.className = `status-badge status-${status}`
         statusBadgeEl.textContent = label
+        const actionable = status === 'loading' && Boolean(state.latestImportId)
+        cancelImportButton.disabled = !actionable
+        selectPackageButton.disabled = status === 'loading'
       }
 
       function escapeHtml(value) {
@@ -689,6 +696,22 @@
           return
         }
 
+        if (state.isParsing) {
+          topRankingsPanelEl.innerHTML = `
+            <div class="summary-card skeleton-card">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line short"></div>
+              <div class="skeleton-line"></div>
+            </div>
+            <div class="summary-card skeleton-card">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line short"></div>
+              <div class="skeleton-line"></div>
+            </div>
+          `
+          return
+        }
+
         const metrics = state.dashboardMetrics || {}
         topRankingsPanelEl.innerHTML = [
           renderTopMetricList('Top Channels', metrics.topChannels),
@@ -938,23 +961,34 @@
       })
 
       selectPackageButton.addEventListener('click', async () => {
+        state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.isParsing = true
+        state.parserProgress = null
         setStatus('loading', 'Loading')
         importStatusEl.textContent = 'Importing archive...'
+        renderTopRankings()
 
-        const importResult = await window.ddpApi.selectZip()
+        const importResult = await window.ddpApi.selectZip({ importId: state.latestImportId })
 
         if (!importResult) {
+          state.isParsing = false
           setStatus('idle', 'Idle')
           importStatusEl.textContent = 'Import cancelled.'
           return
         }
 
-        state.latestImportId = importResult.importId
+        state.latestImportId = importResult.importId || state.latestImportId
         state.importMeta = importResult
         state.parserMetadata = {}
 
         if (!importResult.ok) {
+          state.isParsing = false
           setStatus('error', 'Error')
+          if (importResult.canceled) {
+            setStatus('idle', 'Idle')
+            importStatusEl.textContent = 'Import cancelled.'
+            return
+          }
           const invalidZip = (importResult.warnings || []).some((warning) =>
             warning.toLowerCase().includes('failed to extract'),
           )
@@ -965,8 +999,36 @@
           return
         }
 
+        state.isParsing = false
         importStatusEl.textContent = `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`
         await loadParsedData()
+      })
+
+      cancelImportButton.addEventListener('click', async () => {
+        if (!state.latestImportId) {
+          return
+        }
+        await window.ddpApi.cancelParserJob({ importId: state.latestImportId })
+      })
+
+      window.ddpApi.onParserProgress((progress) => {
+        if (!progress || progress.importId !== state.latestImportId) {
+          return
+        }
+
+        state.parserProgress = progress
+        state.isParsing = progress.stage !== 'complete'
+
+        if (progress.cacheHit) {
+          importStatusEl.textContent = 'Cache hit: loaded analytics from previous import.'
+        } else if (progress.stage === 'parsing') {
+          const eta = Number.isFinite(progress.etaSeconds) ? `${progress.etaSeconds}s` : 'estimating...'
+          importStatusEl.textContent = `Parsing ${progress.filesScanned}/${progress.totalFiles} files • ${progress.recordsProcessed} records • ETA ${eta}`
+        } else if (progress.stage === 'finalizing') {
+          importStatusEl.textContent = `Finalizing analytics (${progress.recordsProcessed} records)...`
+        }
+
+        renderTopRankings()
       })
 
       render()
