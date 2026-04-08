@@ -213,9 +213,15 @@
         [IMPORT_STATES.FAILED]: 'Import failed.',
         [IMPORT_STATES.CANCELED]: 'Import canceled.',
       }
+      const IMPORT_TERMINAL_STATES = [IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED]
+      const IMPORT_CONTROL_FAILSAFE_MS = 20000
 
       const state = {
         latestImportId: null,
+        activeImportId: null,
+        activeJobToken: null,
+        activeJobStatus: 'idle',
+        lastProgressAtMs: null,
         importMeta: null,
         status: IMPORT_STATES.IDLE,
         importFlowState: IMPORT_STATES.IDLE,
@@ -266,12 +272,10 @@
         state.status = status
         statusBadgeEl.className = `status-badge status-${status}`
         statusBadgeEl.textContent = label
-        const actionable =
-          [IMPORT_STATES.SELECTING_FILE, IMPORT_STATES.EXTRACTING_ZIP, IMPORT_STATES.SCANNING_FILES, IMPORT_STATES.PARSING, IMPORT_STATES.AGGREGATING, IMPORT_STATES.STALLED].includes(state.importFlowState) &&
-          Boolean(state.latestImportId)
-        cancelImportButton.disabled = !actionable
-        selectPackageButton.disabled = actionable
-        importModeSelect.disabled = actionable
+        const controlsLocked = Boolean(state.activeImportId) && state.activeJobStatus === 'running'
+        cancelImportButton.disabled = !(controlsLocked && Boolean(state.latestImportId))
+        selectPackageButton.disabled = controlsLocked
+        importModeSelect.disabled = controlsLocked
       }
 
       function getImportModeLabel(importSourceType) {
@@ -1267,11 +1271,15 @@
           latestImportId: state.latestImportId,
           buttonDisabled: selectPackageButton.disabled,
         })
-        if (state.isParsing) {
+        if (Boolean(state.activeImportId) && state.activeJobStatus === 'running') {
           importStatusEl.textContent = 'An import is already running. Please wait for it to finish.'
           return
         }
-        state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.latestImportId = null
+        state.activeImportId = null
+        state.activeJobToken = null
+        state.activeJobStatus = 'running'
+        state.lastProgressAtMs = Date.now()
         state.importSourceType = importModeSelect.value === 'folder' ? 'folder' : 'zip'
         state.isParsing = true
         state.parserProgress = null
@@ -1286,9 +1294,8 @@
         render()
 
         try {
-          console.debug('[ddp][renderer] import invoke:start', { importId: state.latestImportId })
+          console.debug('[ddp][renderer] import invoke:start')
           const importResult = await window.ddpApi.selectImportSource({
-            importId: state.latestImportId,
             importSourceType: state.importSourceType,
           })
           console.debug('[ddp][renderer] import invoke:result', importResult)
@@ -1299,6 +1306,8 @@
           }
 
           state.latestImportId = importResult.importId || state.latestImportId
+          state.activeImportId = importResult.importId || state.activeImportId
+          state.activeJobToken = importResult.jobToken || state.activeJobToken
           state.importMeta = importResult
           state.importSourceType = importResult.importSourceType || state.importSourceType
           state.selectedSourcePath = importResult.selectedSourcePath || state.selectedSourcePath
@@ -1343,6 +1352,7 @@
           )
         } finally {
           state.isParsing = false
+          state.activeJobStatus = 'idle'
           render()
         }
       })
@@ -1371,7 +1381,11 @@
           await window.ddpApi.cancelParserJob({ importId: state.latestImportId })
         }
 
-        state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.latestImportId = null
+        state.activeImportId = null
+        state.activeJobToken = null
+        state.activeJobStatus = 'running'
+        state.lastProgressAtMs = Date.now()
         state.isParsing = true
         state.parserProgress = null
         state.stallInfo = null
@@ -1384,9 +1398,8 @@
         render()
 
         try {
-          console.debug('[ddp][renderer] retry import invoke:start', { importId: state.latestImportId })
+          console.debug('[ddp][renderer] retry import invoke:start')
           const importResult = await window.ddpApi.selectImportSource({
-            importId: state.latestImportId,
             importSourceType: state.importSourceType,
             sourcePath: state.selectedSourcePath,
           })
@@ -1398,6 +1411,8 @@
           }
 
           state.latestImportId = importResult.importId || state.latestImportId
+          state.activeImportId = importResult.importId || state.activeImportId
+          state.activeJobToken = importResult.jobToken || state.activeJobToken
           state.importMeta = importResult
           state.importSourceType = importResult.importSourceType || state.importSourceType
           state.selectedSourcePath = importResult.selectedSourcePath || state.selectedSourcePath
@@ -1415,6 +1430,7 @@
           )
         } finally {
           state.isParsing = false
+          state.activeJobStatus = 'idle'
           render()
         }
       })
@@ -1433,10 +1449,21 @@
       })
 
       window.ddpApi.onParserProgress((progress) => {
-        if (!progress || progress.importId !== state.latestImportId || !progress.progress) {
+        if (!progress || !progress.progress) {
+          return
+        }
+        if (state.activeJobToken && progress.jobToken !== state.activeJobToken) {
+          return
+        }
+        if (state.latestImportId && progress.importId !== state.latestImportId) {
           return
         }
 
+        state.latestImportId = progress.importId || state.latestImportId
+        state.activeImportId = progress.activeImportId || state.activeImportId
+        state.activeJobToken = progress.jobToken || state.activeJobToken
+        state.activeJobStatus = progress.jobStatus || state.activeJobStatus
+        state.lastProgressAtMs = Date.now()
         state.parserProgress = progress.progress
         state.isParsing = progress.progress.phase !== 'complete'
 
@@ -1453,10 +1480,20 @@
       })
 
       window.ddpApi.onImportStatus((payload) => {
-        if (!payload || payload.importId !== state.latestImportId) {
+        if (!payload) {
+          return
+        }
+        if (state.activeJobToken && payload.jobToken && payload.jobToken !== state.activeJobToken) {
+          return
+        }
+        if (state.latestImportId && payload.importId !== state.latestImportId) {
           return
         }
 
+        state.latestImportId = payload.importId || state.latestImportId
+        state.activeImportId = payload.activeImportId ?? state.activeImportId
+        state.activeJobToken = payload.jobToken || state.activeJobToken
+        state.activeJobStatus = payload.jobStatus || state.activeJobStatus
         const nextState = payload.state || IMPORT_STATES.IDLE
         const message = payload.message || IMPORT_STATUS_MESSAGES[nextState]
         if (nextState === IMPORT_STATES.STALLED) {
@@ -1468,9 +1505,31 @@
           state.stallInfo = null
         }
         applyImportFlowState(nextState, message)
-        state.isParsing = ![IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED].includes(nextState)
+        state.isParsing = !IMPORT_TERMINAL_STATES.includes(nextState)
+        if (IMPORT_TERMINAL_STATES.includes(nextState)) {
+          state.activeImportId = null
+          state.activeJobToken = null
+          state.activeJobStatus = nextState
+          state.lastProgressAtMs = null
+        }
         renderStallPanel()
       })
+
+      setInterval(() => {
+        const controlsLocked = Boolean(state.activeImportId) && state.activeJobStatus === 'running'
+        if (!controlsLocked || !state.lastProgressAtMs) {
+          return
+        }
+        if (Date.now() - state.lastProgressAtMs < IMPORT_CONTROL_FAILSAFE_MS) {
+          return
+        }
+        state.activeImportId = null
+        state.activeJobToken = null
+        state.activeJobStatus = 'failed'
+        state.isParsing = false
+        importStatusEl.textContent = 'Import controls re-enabled due to inactivity timeout. You can retry the import.'
+        render()
+      }, 1000)
 
       render()
     </script>
