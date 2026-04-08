@@ -354,6 +354,7 @@ function maybeExtractMessages(payload, sourcePath, warnings) {
 async function processMessagesFromPayload(payload, sourcePath, warnings, onMessage, options = {}) {
   const chunkSize = Number.isFinite(options.chunkSize) ? Math.max(100, options.chunkSize) : 500
   const signal = options.signal
+  const onChunk = typeof options.onChunk === 'function' ? options.onChunk : null
   const messageCandidates = []
 
   if (Array.isArray(payload)) {
@@ -378,8 +379,15 @@ async function processMessagesFromPayload(payload, sourcePath, warnings, onMessa
     }
 
     if (processed > 0 && processed % chunkSize === 0) {
+      if (onChunk) {
+        onChunk(processed)
+      }
       await yieldToEventLoop()
     }
+  }
+
+  if (onChunk && processed > 0 && processed % chunkSize !== 0) {
+    onChunk(processed)
   }
 
   return processed
@@ -975,28 +983,37 @@ async function parseDiscordExport(rootPath, options = {}) {
   const giftedNitro = []
   const signal = options.signal
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
-  const parseStartedAt = Date.now()
   let filesScanned = 0
   let recordsProcessed = 0
+  let lastProgressAt = 0
+  let recordsSinceUpdate = 0
+  let currentPath = null
+  const PROGRESS_INTERVAL_MS = 250
+  const RECORD_PROGRESS_STEP = 250
 
-  function emitProgress(stage, currentPath = null) {
+  function emitProgress(phase, message, force = false) {
     if (!onProgress) {
       return
     }
 
-    const elapsedMs = Math.max(1, Date.now() - parseStartedAt)
-    const totalFiles = jsonFiles.length
-    const ratio = totalFiles > 0 ? filesScanned / totalFiles : 0
-    const etaMs = ratio > 0 ? Math.max(0, Math.round((elapsedMs / ratio) * (1 - ratio))) : null
+    const now = Date.now()
+    if (!force && now - lastProgressAt < PROGRESS_INTERVAL_MS && recordsSinceUpdate < RECORD_PROGRESS_STEP) {
+      return
+    }
+
+    const totalFiles = jsonFiles.length || 0
+    const percent = totalFiles > 0 ? Math.max(0, Math.min(100, Math.round((filesScanned / totalFiles) * 100))) : null
     onProgress({
-      stage,
-      filesScanned,
-      totalFiles,
-      recordsProcessed,
+      phase,
+      percent,
+      filesTotal: totalFiles || null,
+      filesDone: filesScanned,
+      recordsDone: recordsProcessed,
+      message,
       currentPath,
-      etaSeconds: Number.isFinite(etaMs) ? Math.round(etaMs / 1000) : null,
-      elapsedMs,
     })
+    lastProgressAt = now
+    recordsSinceUpdate = 0
   }
 
   let jsonFiles = []
@@ -1031,10 +1048,11 @@ async function parseDiscordExport(rootPath, options = {}) {
     warnings.push('No JSON files were found in the extracted archive.')
   }
 
-  emitProgress('scanning')
+  emitProgress('scanning', 'Scanning extracted JSON files.', true)
 
   for (const jsonPath of jsonFiles) {
     throwIfAborted(signal)
+    currentPath = jsonPath
     let rawContent = null
 
     try {
@@ -1071,6 +1089,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       panelMetadata.premium.sourcePaths.add(jsonPath)
       premiumEvents.push(...extractedPremiumEvents)
       recordsProcessed += extractedPremiumEvents.length
+      recordsSinceUpdate += extractedPremiumEvents.length
     }
 
     const extractedBadges = extractBadgesFromPayload(payload, jsonPath, badgeWarningCollector)
@@ -1078,6 +1097,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       panelMetadata.badges.sourcePaths.add(jsonPath)
       badges.push(...extractedBadges)
       recordsProcessed += extractedBadges.length
+      recordsSinceUpdate += extractedBadges.length
     }
 
     const extractedConnections = extractConnectionsFromPayload(
@@ -1089,6 +1109,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       panelMetadata.connections.sourcePaths.add(jsonPath)
       connections.push(...extractedConnections)
       recordsProcessed += extractedConnections.length
+      recordsSinceUpdate += extractedConnections.length
     }
 
     const extractedBilling = extractBillingDataFromPayload(
@@ -1102,8 +1123,9 @@ async function parseDiscordExport(rootPath, options = {}) {
     billingTransactions.push(...extractedBilling.transactions)
     giftedNitro.push(...extractedBilling.giftedNitro)
     recordsProcessed += extractedBilling.transactions.length + extractedBilling.giftedNitro.length
+    recordsSinceUpdate += extractedBilling.transactions.length + extractedBilling.giftedNitro.length
 
-    const messageCountForFile = await processMessagesFromPayload(
+    await processMessagesFromPayload(
       payload,
       jsonPath,
       warnings,
@@ -1120,17 +1142,27 @@ async function parseDiscordExport(rootPath, options = {}) {
         if (Array.isArray(message.emojiUsage) && message.emojiUsage.length > 0) {
           panelMetadata.emojis.sourcePaths.add(jsonPath)
         }
+        recordsProcessed += 1
+        recordsSinceUpdate += 1
       },
-      { signal, chunkSize: 500 },
+      {
+        signal,
+        chunkSize: 500,
+        onChunk: () => {
+          emitProgress(
+            'indexing',
+            `Parsing ${filesScanned}/${jsonFiles.length} files (${recordsProcessed} records).`,
+          )
+        },
+      },
     )
-    recordsProcessed += messageCountForFile
 
     filesScanned += 1
-    emitProgress('parsing', jsonPath)
+    emitProgress('indexing', `Indexed ${filesScanned}/${jsonFiles.length} files (${recordsProcessed} records).`, true)
     await yieldToEventLoop()
   }
 
-  emitProgress('finalizing')
+  emitProgress('finalizing', `Finalizing analytics from ${recordsProcessed} records.`, true)
 
   const channels = Array.from(channelsById.values()).sort((a, b) => a.name.localeCompare(b.name))
   const premiumHistory = normalizePremiumEventsToIntervals(premiumEvents, warnings)
@@ -1222,7 +1254,7 @@ async function parseDiscordExport(rootPath, options = {}) {
 
   const messageCount = analyticsIndexer.getMessageCount()
 
-  emitProgress('complete')
+  emitProgress('complete', `Completed parse of ${filesScanned} files and ${recordsProcessed} records.`, true)
 
   return {
     premiumHistory,
