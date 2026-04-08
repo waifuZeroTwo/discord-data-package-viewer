@@ -3,7 +3,22 @@ const { IMPORT_STATES } = require('./src/shared/importStates')
 
 contextBridge.exposeInMainWorld('ddpApi', {
   pickDataPackage: () => ipcRenderer.invoke('dialog:pick-data-package'),
-  selectZip: (options) => ipcRenderer.invoke('dialog:select-zip', options),
+  selectImportSource: async (options) => {
+    console.debug('[ddp][preload] selectImportSource invoke:start', options)
+    try {
+      const result = await ipcRenderer.invoke('dialog:select-zip', options)
+      console.debug('[ddp][preload] selectImportSource invoke:result', result)
+      return result
+    } catch (error) {
+      console.error('[ddp][preload] selectImportSource invoke:error', error)
+      throw error
+    }
+  },
+  // Backward-compatible alias for older renderer calls.
+  selectZip: async (options) => {
+    console.debug('[ddp][preload] selectZip alias -> selectImportSource')
+    return ipcRenderer.invoke('dialog:select-zip', options)
+  },
   getParserAnalytics: (options) => ipcRenderer.invoke('parser:get-analytics', options),
   cancelParserJob: (options) => ipcRenderer.invoke('parser:cancel-job', options),
   getImportDiagnostics: (options) => ipcRenderer.invoke('import:get-diagnostics', options),

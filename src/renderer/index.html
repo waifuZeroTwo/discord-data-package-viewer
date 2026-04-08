@@ -1249,6 +1249,12 @@
       })
 
       selectPackageButton.addEventListener('click', async () => {
+        console.debug('[ddp][renderer] import click', {
+          isParsing: state.isParsing,
+          importFlowState: state.importFlowState,
+          latestImportId: state.latestImportId,
+          buttonDisabled: selectPackageButton.disabled,
+        })
         if (state.isParsing) {
           importStatusEl.textContent = 'An import is already running. Please wait for it to finish.'
           return
@@ -1261,52 +1267,63 @@
         stallDebugDetailsEl.open = false
         applyImportFlowState(IMPORT_STATES.SELECTING_FILE)
         renderTopRankings()
+        render()
 
-        const importResult = await window.ddpApi.selectZip({ importId: state.latestImportId })
+        try {
+          console.debug('[ddp][renderer] import invoke:start', { importId: state.latestImportId })
+          const importResult = await window.ddpApi.selectImportSource({ importId: state.latestImportId })
+          console.debug('[ddp][renderer] import invoke:result', importResult)
 
-        if (!importResult) {
-          state.isParsing = false
-          applyImportFlowState(IMPORT_STATES.CANCELED)
-          return
-        }
-
-        state.latestImportId = importResult.importId || state.latestImportId
-        state.importMeta = importResult
-        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
-        state.parserMetadata = {}
-
-        if (!importResult.ok) {
-          state.isParsing = false
-          if (importResult.busy) {
-            applyImportFlowState(
-              IMPORT_STATES.FAILED,
-              'Another import is currently active. Please wait for it to finish.',
-            )
-            return
-          }
-          if (importResult.canceled) {
+          if (!importResult) {
             applyImportFlowState(IMPORT_STATES.CANCELED)
             return
           }
-          const invalidZip = (importResult.warnings || []).some((warning) =>
-            warning.toLowerCase().includes('failed to extract'),
+
+          state.latestImportId = importResult.importId || state.latestImportId
+          state.importMeta = importResult
+          state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
+          state.parserMetadata = {}
+
+          if (!importResult.ok) {
+            if (importResult.busy) {
+              applyImportFlowState(
+                IMPORT_STATES.FAILED,
+                'Another import is currently active. Please wait for it to finish.',
+              )
+              return
+            }
+            if (importResult.canceled) {
+              applyImportFlowState(IMPORT_STATES.CANCELED)
+              return
+            }
+            const invalidZip = (importResult.warnings || []).some((warning) =>
+              warning.toLowerCase().includes('failed to extract'),
+            )
+            applyImportFlowState(
+              IMPORT_STATES.FAILED,
+              invalidZip
+                ? 'Invalid ZIP archive. Please choose a valid Discord export.'
+                : 'Import failed before completion.',
+            )
+            render()
+            return
+          }
+
+          applyImportFlowState(
+            IMPORT_STATES.COMPLETED,
+            `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
           )
+          await loadParsedData()
+        } catch (error) {
+          console.error('[ddp][renderer] import invoke:error', error)
           applyImportFlowState(
             IMPORT_STATES.FAILED,
-            invalidZip
-              ? 'Invalid ZIP archive. Please choose a valid Discord export.'
-              : 'Import failed before completion.',
+            `Import failed unexpectedly: ${error?.message || 'Unknown error'}`,
           )
+        } finally {
+          state.isParsing = false
           render()
-          return
         }
-
-        state.isParsing = false
-        applyImportFlowState(
-          IMPORT_STATES.COMPLETED,
-          `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
-        )
-        await loadParsedData()
       })
 
       cancelImportButton.addEventListener('click', async () => {
@@ -1342,28 +1359,37 @@
         applyImportFlowState(IMPORT_STATES.SELECTING_FILE, 'Retrying import with previously selected ZIP package.')
         render()
 
-        const importResult = await window.ddpApi.selectZip({
-          importId: state.latestImportId,
-          zipPath: state.selectedZipPath,
-        })
+        try {
+          console.debug('[ddp][renderer] retry import invoke:start', { importId: state.latestImportId })
+          const importResult = await window.ddpApi.selectImportSource({
+            importId: state.latestImportId,
+            zipPath: state.selectedZipPath,
+          })
+          console.debug('[ddp][renderer] retry import invoke:result', importResult)
 
-        if (!importResult) {
-          state.isParsing = false
-          applyImportFlowState(IMPORT_STATES.CANCELED)
-          return
-        }
+          if (!importResult) {
+            applyImportFlowState(IMPORT_STATES.CANCELED)
+            return
+          }
 
-        state.latestImportId = importResult.importId || state.latestImportId
-        state.importMeta = importResult
-        state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
-        if (!importResult.ok) {
+          state.latestImportId = importResult.importId || state.latestImportId
+          state.importMeta = importResult
+          state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
+          if (!importResult.ok) {
+            applyImportFlowState(importResult.canceled ? IMPORT_STATES.CANCELED : IMPORT_STATES.FAILED)
+            return
+          }
+          await loadParsedData()
+        } catch (error) {
+          console.error('[ddp][renderer] retry import invoke:error', error)
+          applyImportFlowState(
+            IMPORT_STATES.FAILED,
+            `Retry failed unexpectedly: ${error?.message || 'Unknown error'}`,
+          )
+        } finally {
           state.isParsing = false
-          applyImportFlowState(importResult.canceled ? IMPORT_STATES.CANCELED : IMPORT_STATES.FAILED)
           render()
-          return
         }
-        state.isParsing = false
-        await loadParsedData()
       })
 
       openDebugDetailsButton.addEventListener('click', async () => {
