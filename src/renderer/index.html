@@ -134,22 +134,20 @@
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
 
       selectPackageButton.addEventListener('click', async () => {
-        const selectedPath = await window.ddpApi.pickDataPackage()
+        const importResult = await window.ddpApi.selectZip()
 
-        if (!selectedPath) {
+        if (!importResult) {
           importStatusEl.textContent = 'Import cancelled.'
           return
         }
 
-        importStatusEl.textContent = `Selected package: ${selectedPath}`
-        dataPreviewEl.textContent = JSON.stringify(
-          {
-            summary: 'Package selected, parser implementation pending.',
-            selectedPath,
-          },
-          null,
-          2,
-        )
+        if (!importResult.ok) {
+          importStatusEl.textContent = 'Import completed with issues. Review warnings.'
+        } else {
+          importStatusEl.textContent = `Imported package: ${importResult.importId}`
+        }
+
+        dataPreviewEl.textContent = JSON.stringify(importResult, null, 2)
       })
     </script>
   </body>
