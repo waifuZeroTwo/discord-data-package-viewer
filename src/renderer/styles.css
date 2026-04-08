@@ -468,6 +468,31 @@ select {
   padding: 10px;
 }
 
+.analytics-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.analytics-mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.analytics-mini-table th,
+.analytics-mini-table td {
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 4px;
+}
+
+.analytics-mini-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .summary-value {
   margin-top: 6px;
   font-size: 18px;

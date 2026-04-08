@@ -232,6 +232,28 @@
         }
       }
 
+      function formatBytes(value) {
+        const bytes = Number(value)
+        if (!Number.isFinite(bytes) || bytes < 0) {
+          return 'Unknown'
+        }
+
+        if (bytes < 1024) {
+          return `${bytes} B`
+        }
+
+        const units = ['KB', 'MB', 'GB', 'TB']
+        let size = bytes / 1024
+        let unitIndex = 0
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+          size /= 1024
+          unitIndex += 1
+        }
+
+        return `${size.toFixed(2)} ${units[unitIndex]}`
+      }
+
       function formatDuration(startAt, endAt) {
         const startEpoch = Date.parse(startAt)
         const endEpoch = endAt ? Date.parse(endAt) : Date.now()
@@ -513,8 +535,73 @@
           return
         }
 
-        timelineEl.innerHTML =
-          '<div class="state">Full channel timelines are disabled. Use the analytics panels below for insights.</div>'
+        const metrics = state.dashboardMetrics || {}
+        const normalizedCharacterCount = Number(metrics.characterCount?.count || 0)
+        const mentionCount = Number(metrics.mentions?.count || 0)
+        const attachmentCount = Number(metrics.attachments?.count || 0)
+        const attachmentBytes = Number(metrics.attachments?.totalBytes || 0)
+        const topAttachmentTypes = Array.isArray(metrics.attachments?.topFileTypes) ? metrics.attachments.topFileTypes : []
+        const availabilityNotes = Array.isArray(metrics.dataAvailabilityNotes) ? metrics.dataAvailabilityNotes : []
+
+        const topAttachmentRows = topAttachmentTypes.length
+          ? topAttachmentTypes
+              .map(
+                (entry, index) => `<tr>
+                  <td>${index + 1}</td>
+                  <td>${escapeHtml(entry.label || entry.key || 'unknown')}</td>
+                  <td>${escapeHtml(String(entry.count || 0))}</td>
+                </tr>`,
+              )
+              .join('')
+          : '<tr><td colspan="3" class="muted small">No attachment extensions detected.</td></tr>'
+
+        timelineEl.innerHTML = `
+          <div class="analytics-kpi-grid">
+            <div class="summary-card">
+              <div class="muted small">Characters (normalized)</div>
+              <div class="summary-value">${escapeHtml(normalizedCharacterCount.toLocaleString())}</div>
+              <div class="muted small">${escapeHtml(metrics.characterNormalization?.strategy || 'Basic normalization')}</div>
+            </div>
+            <div class="summary-card">
+              <div class="muted small">Mentions</div>
+              <div class="summary-value">${escapeHtml(mentionCount.toLocaleString())}</div>
+              <div class="muted small">Arrays: ${escapeHtml(String(metrics.mentions?.fromMentionArrays || 0))} • Tokens: ${escapeHtml(
+                String(metrics.mentions?.fromMentionTokens || 0),
+              )}</div>
+            </div>
+            <div class="summary-card">
+              <div class="muted small">Attachments</div>
+              <div class="summary-value">${escapeHtml(attachmentCount.toLocaleString())}</div>
+              <div class="muted small">Total size: ${escapeHtml(formatBytes(attachmentBytes))}</div>
+            </div>
+          </div>
+
+          <details class="data-details" open>
+            <summary>Attachment drilldown</summary>
+            <div class="data-details-body">
+              <table class="analytics-mini-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>File type</th>
+                    <th>Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${topAttachmentRows}
+                </tbody>
+              </table>
+            </div>
+          </details>
+
+          ${
+            availabilityNotes.length
+              ? `<div class="inline-warning-list">${availabilityNotes
+                  .map((note) => `<div class="inline-warning">${escapeHtml(note)}</div>`)
+                  .join('')}</div>`
+              : ''
+          }
+        `
       }
 
       function renderEmojiChip(emoji) {
