@@ -297,6 +297,44 @@ select {
   min-height: 24px;
 }
 
+.connections-panel {
+  overflow-x: auto;
+}
+
+.connections-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.connections-table th,
+.connections-table td {
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 8px;
+  vertical-align: top;
+}
+
+.connections-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.connection-service {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.connection-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+}
+
 .emoji-panel {
   display: flex;
   flex-wrap: wrap;
