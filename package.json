@@ -16,7 +16,9 @@
   "main": "index.js",
   "scripts": {
     "start": "electron .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "node --check index.js && node --check preload.js && node --check src/main/parser/discordExport.js",
+    "build": "electron-builder --dir",
+    "dist": "electron-builder"
   },
   "dependencies": {
     "boolean": "^3.2.0",
@@ -79,6 +81,18 @@
     "yauzl": "^2.10.0"
   },
   "devDependencies": {
-    "electron": "^41.2.0"
+    "electron": "^41.2.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.waifuzerotwo.ddp",
+    "productName": "Discord Data Package Viewer",
+    "files": [
+      "index.js",
+      "preload.js",
+      "src/**/*",
+      "package.json",
+      "package-lock.json"
+    ]
   }
 }

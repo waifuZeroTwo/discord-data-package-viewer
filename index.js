@@ -50,10 +50,104 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   })
 
   win.loadFile(path.join(__dirname, 'src/renderer/index.html'))
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function sanitizePositiveInteger(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const numericValue = Number(value)
+  if (!Number.isInteger(numericValue)) {
+    return fallback
+  }
+
+  if (numericValue < min || numericValue > max) {
+    return fallback
+  }
+
+  return numericValue
+}
+
+function sanitizeDateFilter(value) {
+  if (!isNonEmptyString(value)) {
+    return null
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null
+  }
+
+  return value
+}
+
+function sanitizeParserPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object') {
+    return {
+      valid: false,
+      warnings: ['Invalid parser payload. Expected an object.'],
+    }
+  }
+
+  const importId = isNonEmptyString(payload.importId) ? payload.importId.trim() : ''
+  if (!importId) {
+    return {
+      valid: false,
+      warnings: ['Invalid parser payload: importId is required.'],
+    }
+  }
+
+  const channelId = isNonEmptyString(payload.channelId) ? payload.channelId.trim() : undefined
+  const sortDirection = payload.sortDirection === 'desc' ? 'desc' : 'asc'
+
+  const sanitizedPayload = {
+    importId,
+    sortDirection,
+    channelId,
+    channelPage: sanitizePositiveInteger(payload.channelPage, 1, 1, 10000),
+    channelPageSize: sanitizePositiveInteger(payload.channelPageSize, 100, 1, 5000),
+    messagePage: sanitizePositiveInteger(payload.messagePage, 1, 1, 100000),
+    messagePageSize: sanitizePositiveInteger(payload.messagePageSize, 100, 1, 20000),
+    includeMessages: payload.includeMessages !== false,
+  }
+
+  if (isNonEmptyString(payload.searchQuery)) {
+    sanitizedPayload.searchQuery = payload.searchQuery.trim().slice(0, 200)
+  }
+
+  if (Array.isArray(payload.authors)) {
+    sanitizedPayload.authors = payload.authors
+      .filter(isNonEmptyString)
+      .map((author) => author.trim().slice(0, 100))
+      .slice(0, 100)
+  }
+
+  if (Array.isArray(payload.hasFlags)) {
+    sanitizedPayload.hasFlags = payload.hasFlags
+      .filter(isNonEmptyString)
+      .map((flag) => flag.trim().slice(0, 64))
+      .slice(0, 50)
+  }
+
+  const fromDate = sanitizeDateFilter(payload.fromDate)
+  if (fromDate) {
+    sanitizedPayload.fromDate = fromDate
+  }
+
+  const toDate = sanitizeDateFilter(payload.toDate)
+  if (toDate) {
+    sanitizedPayload.toDate = toDate
+  }
+
+  return {
+    valid: true,
+    payload: sanitizedPayload,
+  }
 }
 
 async function pathExists(targetPath) {
@@ -142,6 +236,20 @@ async function handleSelectZip() {
 
   const warnings = []
   const selectedZipPath = filePaths[0]
+  if (!isNonEmptyString(selectedZipPath) || path.extname(selectedZipPath).toLowerCase() !== '.zip') {
+    return {
+      ok: false,
+      importId: null,
+      rootPath: null,
+      warnings: ['Selected file must be a .zip archive.'],
+      detectedSections: [],
+      parserSummary: {
+        channelCount: 0,
+        messageCount: 0,
+      },
+    }
+  }
+
   const importsRoot = path.join(app.getPath('userData'), IMPORTS_SUBDIR)
 
   await cleanupOldImports(importsRoot)
@@ -199,7 +307,18 @@ async function handleSelectZip() {
 }
 
 async function handleGetParserPage(_event, payload = {}) {
-  const importId = payload.importId
+  const sanitizedPayloadResult = sanitizeParserPayload(payload)
+  if (!sanitizedPayloadResult.valid) {
+    return {
+      ok: false,
+      warnings: sanitizedPayloadResult.warnings,
+      channels: [],
+      messagesByChannel: {},
+    }
+  }
+
+  const sanitizedPayload = sanitizedPayloadResult.payload
+  const importId = sanitizedPayload.importId
   const parsedExport = getCachedParse(importId)
 
   if (!parsedExport) {
@@ -213,11 +332,11 @@ async function handleGetParserPage(_event, payload = {}) {
     }
   }
 
-  if (payload.sortDirection && payload.sortDirection !== parsedExport.sortDirection) {
+  if (sanitizedPayload.sortDirection !== parsedExport.sortDirection) {
     const sortedExport = {
       ...parsedExport,
       messagesByChannel: { ...parsedExport.messagesByChannel },
-      sortDirection: payload.sortDirection === 'desc' ? 'desc' : 'asc',
+      sortDirection: sanitizedPayload.sortDirection,
     }
 
     for (const [channelId, messages] of Object.entries(sortedExport.messagesByChannel)) {
@@ -246,7 +365,7 @@ async function handleGetParserPage(_event, payload = {}) {
     ok: true,
     importId,
     sortDirection: currentParse.sortDirection,
-    ...getPaginatedParserOutput(currentParse, payload),
+    ...getPaginatedParserOutput(currentParse, sanitizedPayload),
   }
 }
 
