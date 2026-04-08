@@ -2,7 +2,17 @@ const { contextBridge, ipcRenderer } = require('electron')
 const { IMPORT_STATES } = require('./src/shared/importStates')
 
 contextBridge.exposeInMainWorld('ddpApi', {
-  pickDataPackage: () => ipcRenderer.invoke('dialog:pick-data-package'),
+  pickDataPackage: async (options) => {
+    console.debug('[ddp][preload] pickDataPackage invoke:start', options)
+    try {
+      const result = await ipcRenderer.invoke('dialog:pick-data-package', options)
+      console.debug('[ddp][preload] pickDataPackage invoke:result', result)
+      return result
+    } catch (error) {
+      console.error('[ddp][preload] pickDataPackage invoke:error', error)
+      throw error
+    }
+  },
   selectImportSource: async (options) => {
     console.debug('[ddp][preload] selectImportSource invoke:start', options)
     try {
