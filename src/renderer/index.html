@@ -247,7 +247,8 @@
         importSourceType: 'zip',
         selectedSourcePath: null,
         selectedZipPath: null,
-        isParsing: false,
+        isImporting: false,
+        uiReady: false,
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
         dashboardMetricMode: localStorage.getItem(DASHBOARD_METRIC_MODE_KEY) === 'characters' ? 'characters' : 'messages',
       }
@@ -269,9 +270,9 @@
         const actionable =
           [IMPORT_STATES.SELECTING_FILE, IMPORT_STATES.EXTRACTING_ZIP, IMPORT_STATES.SCANNING_FILES, IMPORT_STATES.PARSING, IMPORT_STATES.AGGREGATING, IMPORT_STATES.STALLED].includes(state.importFlowState) &&
           Boolean(state.latestImportId)
-        cancelImportButton.disabled = !actionable
-        selectPackageButton.disabled = actionable
-        importModeSelect.disabled = actionable
+        cancelImportButton.disabled = !state.uiReady || !actionable
+        selectPackageButton.disabled = !state.uiReady || actionable
+        importModeSelect.disabled = !state.uiReady || actionable
       }
 
       function getImportModeLabel(importSourceType) {
@@ -301,7 +302,7 @@
 
       function renderProgress() {
         const progress = state.parserProgress
-        if (!progress || !state.isParsing) {
+        if (!progress || !state.isImporting) {
           progressPanelEl.classList.add('hidden')
           return
         }
@@ -983,7 +984,7 @@
           return
         }
 
-        if (state.isParsing) {
+        if (state.isImporting) {
           topRankingsPanelEl.innerHTML = `
             <div class="summary-card skeleton-card">
               <div class="skeleton-line"></div>
@@ -1262,18 +1263,18 @@
 
       selectPackageButton.addEventListener('click', async () => {
         console.debug('[ddp][renderer] import click', {
-          isParsing: state.isParsing,
+          isImporting: state.isImporting,
           importFlowState: state.importFlowState,
           latestImportId: state.latestImportId,
           buttonDisabled: selectPackageButton.disabled,
         })
-        if (state.isParsing) {
+        if (state.isImporting) {
           importStatusEl.textContent = 'An import is already running. Please wait for it to finish.'
           return
         }
         state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         state.importSourceType = importModeSelect.value === 'folder' ? 'folder' : 'zip'
-        state.isParsing = true
+        state.isImporting = true
         state.parserProgress = null
         state.stallInfo = null
         state.stallDiagnostics = []
@@ -1342,7 +1343,7 @@
             `Import failed unexpectedly: ${error?.message || 'Unknown error'}`,
           )
         } finally {
-          state.isParsing = false
+          state.isImporting = false
           render()
         }
       })
@@ -1372,7 +1373,7 @@
         }
 
         state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        state.isParsing = true
+        state.isImporting = true
         state.parserProgress = null
         state.stallInfo = null
         state.stallDiagnostics = []
@@ -1414,7 +1415,7 @@
             `Retry failed unexpectedly: ${error?.message || 'Unknown error'}`,
           )
         } finally {
-          state.isParsing = false
+          state.isImporting = false
           render()
         }
       })
@@ -1438,7 +1439,7 @@
         }
 
         state.parserProgress = progress.progress
-        state.isParsing = progress.progress.phase !== 'complete'
+        state.isImporting = progress.progress.phase !== 'complete'
 
         if (progress.progress.message) {
           const sourceBits = [getImportModeLabel(state.importSourceType)]
@@ -1468,11 +1469,26 @@
           state.stallInfo = null
         }
         applyImportFlowState(nextState, message)
-        state.isParsing = ![IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED].includes(nextState)
+        state.isImporting = ![IMPORT_STATES.COMPLETED, IMPORT_STATES.FAILED, IMPORT_STATES.CANCELED].includes(nextState)
         renderStallPanel()
       })
 
+      async function initializeImportState() {
+        try {
+          await window.ddpApi.resetImportState({ reason: 'renderer-startup' })
+        } catch (error) {
+          console.error('[ddp][renderer] import reset failed at startup', error)
+        } finally {
+          state.isImporting = false
+          state.importFlowState = IMPORT_STATES.IDLE
+          state.uiReady = true
+          applyImportFlowState(IMPORT_STATES.IDLE)
+          render()
+        }
+      }
+
       render()
+      initializeImportState()
     </script>
   </body>
 </html>

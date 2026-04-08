@@ -26,6 +26,12 @@ const DEFAULT_STALL_THRESHOLD_MS = 1000 * 15
 const parsedArchiveCache = new Map()
 const activeParserJobs = new Map()
 let activeImportRequest = null
+const importState = {
+  state: IMPORT_STATES.IDLE,
+  isImporting: false,
+  currentPhase: null,
+  activeImportId: null,
+}
 
 const KNOWN_SECTION_DETECTORS = [
   {
@@ -146,6 +152,61 @@ function emitImportStatus(event, payload) {
     return
   }
   event.sender.send('import:status', payload)
+}
+
+function sanitizeImportState(nextState = {}) {
+  const knownStates = new Set(Object.values(IMPORT_STATES))
+  const normalizedState = knownStates.has(nextState.state) ? nextState.state : IMPORT_STATES.IDLE
+  const isImporting = Boolean(nextState.isImporting)
+  const currentPhase = typeof nextState.currentPhase === 'string' && nextState.currentPhase.trim()
+    ? nextState.currentPhase
+    : null
+  const activeImportId = typeof nextState.activeImportId === 'string' && nextState.activeImportId.trim()
+    ? nextState.activeImportId
+    : null
+
+  return {
+    state: normalizedState,
+    isImporting,
+    currentPhase,
+    activeImportId,
+  }
+}
+
+function setImportState(partial = {}) {
+  const nextState = sanitizeImportState({
+    ...importState,
+    ...partial,
+  })
+  Object.assign(importState, nextState)
+  return { ...importState }
+}
+
+function getImportStateSnapshot() {
+  return { ...importState }
+}
+
+function resetImportState() {
+  return setImportState({
+    state: IMPORT_STATES.IDLE,
+    isImporting: false,
+    currentPhase: null,
+    activeImportId: null,
+  })
+}
+
+function runStartupImportStateSanityCheck() {
+  const hasActiveWorker = Boolean(importState.activeImportId && activeParserJobs.has(importState.activeImportId))
+  const impossibleState = importState.isImporting && !hasActiveWorker
+  if (!impossibleState) {
+    return getImportStateSnapshot()
+  }
+
+  console.warn('[ddp][main] startup sanity check: clearing impossible import state', {
+    importState: getImportStateSnapshot(),
+    activeParserJobIds: [...activeParserJobs.keys()],
+  })
+  return resetImportState()
 }
 
 function normalizeProgressPayload(payload = {}) {
@@ -376,6 +437,12 @@ async function handleSelectZip(event, payload = {}) {
     hasZipPath: typeof payload.zipPath === 'string' && payload.zipPath.trim().length > 0,
   })
   if (activeImportRequest && activeImportRequest !== importId) {
+    setImportState({
+      state: IMPORT_STATES.FAILED,
+      isImporting: false,
+      currentPhase: null,
+      activeImportId: activeImportRequest,
+    })
     emitImportStatus(event, {
       importId,
       state: IMPORT_STATES.FAILED,
@@ -397,6 +464,12 @@ async function handleSelectZip(event, payload = {}) {
   }
 
   activeImportRequest = importId
+  setImportState({
+    state: IMPORT_STATES.SELECTING_FILE,
+    isImporting: true,
+    currentPhase: 'selecting',
+    activeImportId: importId,
+  })
   emitImportStatus(event, {
     importId,
     state: IMPORT_STATES.SELECTING_FILE,
@@ -425,6 +498,12 @@ async function handleSelectZip(event, payload = {}) {
 
       const { canceled, filePaths } = await dialog.showOpenDialog(dialogOptions)
       if (canceled || filePaths.length === 0) {
+        setImportState({
+          state: IMPORT_STATES.CANCELED,
+          isImporting: false,
+          currentPhase: null,
+          activeImportId: null,
+        })
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.CANCELED,
@@ -484,6 +563,7 @@ async function handleSelectZip(event, payload = {}) {
         await fs.mkdir(rootPath, { recursive: true })
         parserRootPath = rootPath
         setRuntimePhase(runtime, 'extracting')
+        setImportState({ state: IMPORT_STATES.EXTRACTING_ZIP, currentPhase: runtime.currentPhase })
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.EXTRACTING_ZIP,
@@ -504,6 +584,7 @@ async function handleSelectZip(event, payload = {}) {
       }
 
       setRuntimePhase(runtime, 'scanning')
+      setImportState({ state: IMPORT_STATES.SCANNING_FILES, currentPhase: runtime.currentPhase })
       emitImportStatus(event, {
         importId,
         state: IMPORT_STATES.SCANNING_FILES,
@@ -523,6 +604,7 @@ async function handleSelectZip(event, payload = {}) {
       let parsedExport
       if (cachedAnalytics) {
         setRuntimePhase(runtime, 'aggregating')
+        setImportState({ state: IMPORT_STATES.AGGREGATING, currentPhase: runtime.currentPhase })
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.AGGREGATING,
@@ -538,6 +620,7 @@ async function handleSelectZip(event, payload = {}) {
         })
       } else {
         setRuntimePhase(runtime, 'parsing')
+        setImportState({ state: IMPORT_STATES.PARSING, currentPhase: runtime.currentPhase })
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.PARSING,
@@ -572,6 +655,7 @@ async function handleSelectZip(event, payload = {}) {
           })
           throwIfImportCanceled(runtime)
           setRuntimePhase(runtime, 'aggregating')
+          setImportState({ state: IMPORT_STATES.AGGREGATING, currentPhase: runtime.currentPhase })
           emitImportStatus(event, {
             importId,
             state: IMPORT_STATES.AGGREGATING,
@@ -589,6 +673,12 @@ async function handleSelectZip(event, payload = {}) {
       await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
       parsedArchiveCache.set(importId, parsedExport)
       setRuntimePhase(runtime, 'complete')
+      setImportState({
+        state: IMPORT_STATES.COMPLETED,
+        isImporting: false,
+        currentPhase: runtime.currentPhase,
+        activeImportId: null,
+      })
 
       emitImportStatus(event, {
         importId,
@@ -621,6 +711,12 @@ async function handleSelectZip(event, payload = {}) {
     } catch (error) {
       if (error?.name === 'AbortError') {
         await fs.rm(rootPath, { recursive: true, force: true })
+        setImportState({
+          state: IMPORT_STATES.CANCELED,
+          isImporting: false,
+          currentPhase: null,
+          activeImportId: null,
+        })
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.CANCELED,
@@ -652,6 +748,12 @@ async function handleSelectZip(event, payload = {}) {
       activeParserJobs.delete(importId)
     }
   } catch (error) {
+    setImportState({
+      state: IMPORT_STATES.FAILED,
+      isImporting: false,
+      currentPhase: null,
+      activeImportId: null,
+    })
     emitImportStatus(event, {
       importId,
       state: IMPORT_STATES.FAILED,
@@ -674,6 +776,16 @@ async function handleSelectZip(event, payload = {}) {
       activeImportRequest = null
     }
   }
+}
+
+function handleImportReset(_event, payload = {}) {
+  const reason = typeof payload.reason === 'string' && payload.reason.trim()
+    ? payload.reason
+    : 'renderer-startup'
+  const previousState = getImportStateSnapshot()
+  const nextState = resetImportState()
+  console.info('[ddp][main] import reset', { reason, previousState, nextState })
+  return { ok: true, state: nextState }
 }
 
 async function computeFileSha256(filePath) {
@@ -812,11 +924,14 @@ function handleGetImportDiagnostics(_event, payload = {}) {
 }
 
 app.whenReady().then(() => {
+  runStartupImportStateSanityCheck()
+
   ipcMain.handle('dialog:pick-data-package', handleSelectZip)
   ipcMain.handle('dialog:select-zip', handleSelectZip)
   ipcMain.handle('parser:get-analytics', handleGetParserAnalytics)
   ipcMain.handle('parser:cancel-job', handleCancelParserJob)
   ipcMain.handle('import:get-diagnostics', handleGetImportDiagnostics)
+  ipcMain.handle('import:reset', handleImportReset)
 
   createWindow()
 
