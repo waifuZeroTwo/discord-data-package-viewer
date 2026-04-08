@@ -1,5 +1,9 @@
 const path = require('path')
 const fs = require('fs/promises')
+const {
+  extractPremiumEventsFromPayload,
+  normalizePremiumEventsToIntervals,
+} = require('./premiumHistory')
 
 const DEFAULT_SORT_DIRECTION = 'asc'
 
@@ -215,6 +219,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
   return {
     channels,
     messagesByChannel,
+    premiumHistory: parsedExport.premiumHistory ?? [],
     warnings: parsedExport.warnings,
     channelPageInfo: {
       page: channelPage,
@@ -231,6 +236,7 @@ async function parseDiscordExport(rootPath, options = {}) {
   const channelsById = new Map()
   const messagesByChannel = {}
   const sortDirection = normalizeSortDirection(options.sortDirection)
+  const premiumEvents = []
 
   let jsonFiles = []
 
@@ -240,6 +246,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     return {
       channels: [],
       messagesByChannel: {},
+      premiumHistory: [],
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -275,6 +282,8 @@ async function parseDiscordExport(rootPath, options = {}) {
       }
     }
 
+    premiumEvents.push(...extractPremiumEventsFromPayload(payload, jsonPath, warnings))
+
     const messages = maybeExtractMessages(payload, jsonPath, warnings)
     for (const message of messages) {
       if (!messagesByChannel[message.channelId]) {
@@ -298,10 +307,12 @@ async function parseDiscordExport(rootPath, options = {}) {
   }
 
   const channels = Array.from(channelsById.values()).sort((a, b) => a.name.localeCompare(b.name))
+  const premiumHistory = normalizePremiumEventsToIntervals(premiumEvents, warnings)
 
   return {
     channels,
     messagesByChannel,
+    premiumHistory,
     warnings,
     sortDirection,
   }
