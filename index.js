@@ -1,5 +1,7 @@
 const path = require('path')
+const nodeFs = require('fs')
 const fs = require('fs/promises')
+const crypto = require('crypto')
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const extract = require('extract-zip')
 const {
@@ -11,7 +13,9 @@ const IMPORTS_SUBDIR = 'imports'
 const IMPORT_RETENTION_MS = 1000 * 60 * 60 * 24 * 7
 const IMPORT_MAX_COUNT = 10
 const PARSER_DEBUG_LOG = 'parser-debug.log'
+const ANALYTICS_CACHE_SUBDIR = 'analytics-cache'
 const parsedArchiveCache = new Map()
+const activeParserJobs = new Map()
 
 const KNOWN_SECTION_DETECTORS = [
   {
@@ -127,7 +131,7 @@ function getCachedParse(importId) {
   return parsedArchiveCache.get(importId)
 }
 
-async function handleSelectZip() {
+async function handleSelectZip(event, payload = {}) {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: 'Select Discord Data Package',
     properties: ['openFile'],
@@ -144,11 +148,15 @@ async function handleSelectZip() {
   const warnings = []
   const selectedZipPath = filePaths[0]
   const importsRoot = path.join(app.getPath('userData'), IMPORTS_SUBDIR)
+  const analyticsCacheRoot = path.join(app.getPath('userData'), ANALYTICS_CACHE_SUBDIR)
 
   await cleanupOldImports(importsRoot)
+  await fs.mkdir(analyticsCacheRoot, { recursive: true })
 
-  const importId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const rootPath = path.join(importsRoot, importId)
+  const importHash = await computeFileSha256(selectedZipPath)
+  const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
 
   await fs.mkdir(rootPath, { recursive: true })
 
@@ -183,13 +191,73 @@ async function handleSelectZip() {
     )
   }
 
-  const parsedExport = await parseDiscordExport(rootPath, { sortDirection: 'asc' })
+  let parsedExport
+  if (cachedAnalytics) {
+    parsedExport = cachedAnalytics
+    if (event?.sender && !event.sender.isDestroyed()) {
+      event.sender.send('parser:progress', {
+        importId,
+        importHash,
+        stage: 'complete',
+        filesScanned: 0,
+        totalFiles: 0,
+        recordsProcessed: parsedExport.analyticsSummary?.messageCount ?? 0,
+        currentPath: null,
+        etaSeconds: 0,
+        elapsedMs: 0,
+        cacheHit: true,
+      })
+    }
+  } else {
+    const parseAbortController = new AbortController()
+    activeParserJobs.set(importId, { abortController: parseAbortController })
+    try {
+      parsedExport = await parseDiscordExport(rootPath, {
+        sortDirection: 'asc',
+        signal: parseAbortController.signal,
+        onProgress: (progress) => {
+          if (event?.sender && !event.sender.isDestroyed()) {
+            event.sender.send('parser:progress', {
+              importId,
+              importHash,
+              ...progress,
+            })
+          }
+        },
+      })
+      await persistAnalyticsCache(analyticsCacheRoot, importHash, parsedExport)
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        await fs.rm(rootPath, { recursive: true, force: true })
+        return {
+          ok: false,
+          canceled: true,
+          importId,
+          importHash,
+          rootPath,
+          warnings: ['Import cancelled before analytics indexing finished.'],
+          detectedSections: [],
+          parserSummary: {
+            channelCount: 0,
+            messageCount: 0,
+          },
+        }
+      }
+
+      throw error
+    } finally {
+      activeParserJobs.delete(importId)
+    }
+  }
+
   await appendParserDebugLog(importId, [...warnings, ...parsedExport.warnings])
   parsedArchiveCache.set(importId, parsedExport)
 
   return {
     ok: true,
     importId,
+    importHash,
+    cacheHit: Boolean(cachedAnalytics),
     rootPath,
     warnings: [...warnings, ...parsedExport.warnings],
     detectedSections,
@@ -200,6 +268,36 @@ async function handleSelectZip() {
       sortDirection: parsedExport.sortDirection,
     },
   }
+}
+
+async function computeFileSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const stream = nodeFs.createReadStream(filePath)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('end', () => resolve(hash.digest('hex')))
+    stream.on('error', reject)
+  })
+}
+
+async function loadAnalyticsCache(cacheRoot, importHash) {
+  const cachePath = path.join(cacheRoot, `${importHash}.json`)
+  try {
+    const payload = await fs.readFile(cachePath, 'utf8')
+    const parsed = JSON.parse(payload)
+    if (!parsed || typeof parsed !== 'object') {
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+async function persistAnalyticsCache(cacheRoot, importHash, parsedExport) {
+  const cachePath = path.join(cacheRoot, `${importHash}.json`)
+  await fs.writeFile(cachePath, JSON.stringify(parsedExport), 'utf8')
 }
 
 async function appendParserDebugLog(importId, warningMessages) {
@@ -242,10 +340,21 @@ async function handleGetParserAnalytics(_event, payload = {}) {
   }
 }
 
+function handleCancelParserJob(_event, payload = {}) {
+  const importId = payload.importId
+  if (!importId || !activeParserJobs.has(importId)) {
+    return { ok: false, canceled: false }
+  }
+
+  activeParserJobs.get(importId).abortController.abort()
+  return { ok: true, canceled: true }
+}
+
 app.whenReady().then(() => {
   ipcMain.handle('dialog:pick-data-package', handleSelectZip)
   ipcMain.handle('dialog:select-zip', handleSelectZip)
   ipcMain.handle('parser:get-analytics', handleGetParserAnalytics)
+  ipcMain.handle('parser:cancel-job', handleCancelParserJob)
 
   createWindow()
 
