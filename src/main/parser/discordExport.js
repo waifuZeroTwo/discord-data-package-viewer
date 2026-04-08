@@ -4,6 +4,7 @@ const {
   extractPremiumEventsFromPayload,
   normalizePremiumEventsToIntervals,
 } = require('./premiumHistory')
+const { createAnalyticsIndexer } = require('./analyticsIndexer')
 const { mapLegacyBadge, mapPremiumType, mapPublicFlags } = require('../../shared/badges')
 
 const DEFAULT_SORT_DIRECTION = 'asc'
@@ -230,9 +231,48 @@ function normalizeMessage(rawMessage, sourcePath, warnings) {
     warnings.push(`Message in ${sourcePath} had invalid timestamp: ${String(timestampInput)}`)
   }
 
+  const channelTypeRaw =
+    rawMessage.channel?.type ?? rawMessage.channel_type ?? rawMessage.channelType ?? rawMessage.type ?? null
+  const channelType = typeof channelTypeRaw === 'string' ? channelTypeRaw.toLowerCase() : String(channelTypeRaw ?? '')
+  const isDirectMessage = channelType.includes('dm') && !channelType.includes('group')
+  const isGroupDirectMessage = channelType.includes('group')
+
   return {
     id: rawMessage.id ? String(rawMessage.id) : null,
     channelId: String(channelId),
+    channelName:
+      rawMessage.channel?.name ??
+      rawMessage.channel_name ??
+      rawMessage.channelName ??
+      rawMessage.conversation?.name ??
+      null,
+    guildId: rawMessage.guild?.id ?? rawMessage.guild_id ?? rawMessage.guildId ?? null,
+    guildName: rawMessage.guild?.name ?? rawMessage.guild_name ?? rawMessage.guildName ?? null,
+    dmUserId: isDirectMessage
+      ? rawMessage.recipient?.id ??
+        rawMessage.dmUser?.id ??
+        rawMessage.recipient_id ??
+        rawMessage.dm_user_id ??
+        null
+      : null,
+    dmUserName: isDirectMessage
+      ? rawMessage.recipient?.username ??
+        rawMessage.recipient?.name ??
+        rawMessage.dmUser?.username ??
+        rawMessage.dm_user_name ??
+        null
+      : null,
+    groupDmId: isGroupDirectMessage
+      ? rawMessage.groupDm?.id ?? rawMessage.group_dm_id ?? rawMessage.groupDMId ?? rawMessage.channel?.id ?? null
+      : null,
+    groupDmName: isGroupDirectMessage
+      ? rawMessage.groupDm?.name ??
+        rawMessage.group_dm_name ??
+        rawMessage.groupDMName ??
+        rawMessage.channel?.name ??
+        null
+      : null,
+    mentions: Array.isArray(rawMessage.mentions) ? rawMessage.mentions : [],
     author: typeof authorName === 'string' ? authorName : 'Unknown Author',
     content: typeof rawMessage.content === 'string' ? rawMessage.content : '',
     timestamp: timestamp.value,
@@ -858,6 +898,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
       channelCount: 0,
       messageCount: 0,
     },
+    dashboardMetrics: parsedExport.dashboardMetrics ?? {},
     warnings: parsedExport.warnings,
   }
 }
@@ -866,7 +907,7 @@ async function parseDiscordExport(rootPath, options = {}) {
   const warnings = []
   const panelMetadata = createPanelMetadata()
   const channelsById = new Map()
-  const messagesByChannel = {}
+  const analyticsIndexer = createAnalyticsIndexer()
   const sortDirection = normalizeSortDirection(options.sortDirection)
   const premiumEvents = []
   const badges = []
@@ -891,6 +932,7 @@ async function parseDiscordExport(rootPath, options = {}) {
         channelCount: 0,
         messageCount: 0,
       },
+      dashboardMetrics: {},
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -921,9 +963,6 @@ async function parseDiscordExport(rootPath, options = {}) {
     const channels = maybeExtractChannels(payload, jsonPath, warnings)
     for (const channel of channels) {
       channelsById.set(channel.id, channel)
-      if (!messagesByChannel[channel.id]) {
-        messagesByChannel[channel.id] = []
-      }
     }
 
     const premiumWarningCollector = createWarningCollector(warnings, panelMetadata, 'premium')
@@ -970,10 +1009,6 @@ async function parseDiscordExport(rootPath, options = {}) {
 
     const messages = maybeExtractMessages(payload, jsonPath, warnings)
     for (const message of messages) {
-      if (!messagesByChannel[message.channelId]) {
-        messagesByChannel[message.channelId] = []
-      }
-
       if (!channelsById.has(message.channelId)) {
         channelsById.set(message.channelId, {
           id: message.channelId,
@@ -982,15 +1017,11 @@ async function parseDiscordExport(rootPath, options = {}) {
         })
       }
 
-      messagesByChannel[message.channelId].push(message)
+      analyticsIndexer.ingestMessage(message)
       if (Array.isArray(message.emojiUsage) && message.emojiUsage.length > 0) {
         panelMetadata.emojis.sourcePaths.add(jsonPath)
       }
     }
-  }
-
-  for (const channelId of Object.keys(messagesByChannel)) {
-    sortMessages(messagesByChannel[channelId], sortDirection)
   }
 
   const channels = Array.from(channelsById.values()).sort((a, b) => a.name.localeCompare(b.name))
@@ -1011,7 +1042,8 @@ async function parseDiscordExport(rootPath, options = {}) {
       ]),
     ).values(),
   ).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
-  const { recentEmojis, favoriteEmojis } = buildEmojiDatasets(messagesByChannel)
+  const { recentEmojis, favoriteEmojis } = analyticsIndexer.getEmojiDatasets()
+  const dashboardMetrics = analyticsIndexer.getDashboardSummary()
   const dedupedBillingTransactions = Array.from(
     new Map(
       billingTransactions.map((entry) => [
@@ -1080,7 +1112,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     }
   }
 
-  const messageCount = Object.values(messagesByChannel).reduce((count, messages) => count + messages.length, 0)
+  const messageCount = analyticsIndexer.getMessageCount()
 
   return {
     premiumHistory,
@@ -1096,6 +1128,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       channelCount: channels.length,
       messageCount,
     },
+    dashboardMetrics,
     warnings,
     sortDirection,
   }
