@@ -40,12 +40,12 @@ function inferAttachmentExtension(attachment) {
 
 function getIsoWeekKey(epochMs) {
   const date = new Date(epochMs)
-  const utcDate = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
-  const day = utcDate.getUTCDay() || 7
-  utcDate.setUTCDate(utcDate.getUTCDate() + 4 - day)
-  const yearStart = new Date(Date.UTC(utcDate.getUTCFullYear(), 0, 1))
-  const weekNo = Math.ceil(((utcDate - yearStart) / 86400000 + 1) / 7)
-  return `${utcDate.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`
+  const localDate = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const day = localDate.getDay() || 7
+  localDate.setDate(localDate.getDate() + 4 - day)
+  const yearStart = new Date(localDate.getFullYear(), 0, 1)
+  const weekNo = Math.ceil(((localDate - yearStart) / 86400000 + 1) / 7)
+  return `${localDate.getFullYear()}-W${String(weekNo).padStart(2, '0')}`
 }
 
 function toTopList(counterMap, limit = TOP_METRIC_LIMIT) {
@@ -274,14 +274,21 @@ function createAnalyticsIndexer() {
 
       if (Number.isFinite(message.timestampEpochMs)) {
         const date = new Date(message.timestampEpochMs)
-        const hourKey = String(date.getUTCHours()).padStart(2, '0')
-        const monthKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
-        const yearKey = String(date.getUTCFullYear())
+        const hourKey = String(date.getHours()).padStart(2, '0')
+        const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+        const yearKey = String(date.getFullYear())
 
-        bumpMetric(counters.activeHours, hourKey, `${hourKey}:00 UTC`)
-        bumpMetric(counters.activeWeeks, getIsoWeekKey(message.timestampEpochMs), getIsoWeekKey(message.timestampEpochMs))
-        bumpMetric(counters.activeMonths, monthKey, monthKey)
-        bumpMetric(counters.activeYears, yearKey, yearKey)
+        bumpMetric(counters.activeHours, hourKey, `${hourKey}:00`, 1, {}, characterCount)
+        bumpMetric(
+          counters.activeWeeks,
+          getIsoWeekKey(message.timestampEpochMs),
+          getIsoWeekKey(message.timestampEpochMs),
+          1,
+          {},
+          characterCount,
+        )
+        bumpMetric(counters.activeMonths, monthKey, monthKey, 1, {}, characterCount)
+        bumpMetric(counters.activeYears, yearKey, yearKey, 1, {}, characterCount)
       }
 
       if (Array.isArray(message.emojiUsage)) {
