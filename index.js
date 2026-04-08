@@ -434,11 +434,19 @@ async function handleSelectZip(event, payload = {}) {
             properties: ['openFile'],
             filters: [
               { name: 'ZIP archive', extensions: ['zip'] },
-              { name: 'All files', extensions: ['*'] },
             ],
           }
 
-      const { canceled, filePaths } = await dialog.showOpenDialog(dialogOptions)
+      const parentWindow =
+        BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      console.debug('[ddp][main] showOpenDialog:start', {
+        importId,
+        importSourceType: requestedImportSourceType,
+        hasParentWindow: Boolean(parentWindow),
+        dialogOptions,
+      })
+      const { canceled, filePaths } = await dialog.showOpenDialog(parentWindow, dialogOptions)
+      console.debug('[ddp][main] showOpenDialog:result', { canceled, filePaths })
       if (canceled || filePaths.length === 0) {
         emitImportStatus(event, {
           importId,
