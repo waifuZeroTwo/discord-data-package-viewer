@@ -533,6 +533,70 @@ select {
   font-weight: 600;
 }
 
+.trend-bars {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.trend-bar-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 90px) 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.trend-bar-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.trend-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: #0f172a;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.trend-bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #7c8cf8, #48b2ff);
+}
+
+.trend-bar-value {
+  font-size: 12px;
+}
+
+.hourly-heatmap {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(68px, 1fr));
+  gap: 8px;
+}
+
+.heatmap-cell {
+  border: 1px solid color-mix(in oklab, #7c8cf8 var(--intensity), var(--border));
+  background: color-mix(in oklab, #7c8cf8 calc(var(--intensity) * 0.4), var(--surface-elevated));
+  border-radius: 8px;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.heatmap-hour {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.heatmap-value {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .billing-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

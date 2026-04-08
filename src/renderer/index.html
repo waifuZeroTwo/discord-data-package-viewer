@@ -141,6 +141,7 @@
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
 
       const PREMIUM_HISTORY_MODE_KEY = 'ddp:premium-history-mode'
+      const DASHBOARD_METRIC_MODE_KEY = 'ddp:dashboard-metric-mode'
 
       const state = {
         latestImportId: null,
@@ -169,6 +170,7 @@
           messageCount: 0,
         },
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
+        dashboardMetricMode: localStorage.getItem(DASHBOARD_METRIC_MODE_KEY) === 'characters' ? 'characters' : 'messages',
       }
 
       const timestampFormatter = new Intl.DateTimeFormat(undefined, {
@@ -177,7 +179,9 @@
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
+        timeZoneName: 'short',
       })
+      const localTimezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local time'
 
       function setStatus(status, label) {
         state.status = status
@@ -204,7 +208,97 @@
           return timestamp
         }
 
-        return timestampFormatter.format(new Date(epoch))
+        return `${timestampFormatter.format(new Date(epoch))} (${localTimezoneName})`
+      }
+
+      function setDashboardMetricMode(mode) {
+        state.dashboardMetricMode = mode === 'characters' ? 'characters' : 'messages'
+        localStorage.setItem(DASHBOARD_METRIC_MODE_KEY, state.dashboardMetricMode)
+      }
+
+      function getTemporalValue(entry) {
+        return state.dashboardMetricMode === 'characters' ? Number(entry?.characterCount || 0) : Number(entry?.count || 0)
+      }
+
+      function getTemporalMetricLabel() {
+        return state.dashboardMetricMode === 'characters' ? 'Character count' : 'Message count'
+      }
+
+      function getTopTemporalEntry(rows) {
+        if (!Array.isArray(rows) || rows.length === 0) {
+          return null
+        }
+
+        const sortedRows = [...rows].sort(
+          (a, b) =>
+            getTemporalValue(b) - getTemporalValue(a) ||
+            Number(b.count || 0) - Number(a.count || 0) ||
+            String(a.label || a.key).localeCompare(String(b.label || b.key)),
+        )
+        return sortedRows[0]
+      }
+
+      function renderTimeSeriesBarChart(title, rows, options = {}) {
+        const normalizedRows = Array.isArray(rows) ? rows : []
+        const valueLabel = getTemporalMetricLabel()
+        const maxValue = normalizedRows.reduce((max, row) => Math.max(max, getTemporalValue(row)), 0)
+        const emptyLabel = options.emptyLabel || 'No records found.'
+
+        if (!normalizedRows.length || maxValue <= 0) {
+          return `<div class="summary-card">
+            <div class="summary-value small">${escapeHtml(title)}</div>
+            <div class="muted small">${escapeHtml(emptyLabel)}</div>
+          </div>`
+        }
+
+        const sortedRows = [...normalizedRows].sort((a, b) => String(a.key || '').localeCompare(String(b.key || '')))
+        return `<div class="summary-card">
+          <div class="summary-value small">${escapeHtml(title)}</div>
+          <div class="muted small">${escapeHtml(valueLabel)}</div>
+          <div class="trend-bars">
+            ${sortedRows
+              .map((row) => {
+                const value = getTemporalValue(row)
+                const width = maxValue > 0 ? Math.max((value / maxValue) * 100, 1) : 0
+                const tooltip = `${row.label || row.key}: ${value.toLocaleString()} ${valueLabel.toLowerCase()}`
+                return `<div class="trend-bar-row" title="${escapeHtml(tooltip)}">
+                  <span class="trend-bar-label">${escapeHtml(String(row.label || row.key))}</span>
+                  <span class="trend-bar-track"><span class="trend-bar-fill" style="width:${width.toFixed(2)}%"></span></span>
+                  <span class="trend-bar-value">${escapeHtml(value.toLocaleString())}</span>
+                </div>`
+              })
+              .join('')}
+          </div>
+        </div>`
+      }
+
+      function renderHourlyHeatmap(rows) {
+        const valueLabel = getTemporalMetricLabel()
+        const rowMap = new Map((Array.isArray(rows) ? rows : []).map((row) => [String(row.key).padStart(2, '0'), row]))
+        const completeRows = Array.from({ length: 24 }, (_, hour) => {
+          const key = String(hour).padStart(2, '0')
+          const row = rowMap.get(key)
+          return row || { key, label: `${key}:00`, count: 0, characterCount: 0 }
+        })
+        const maxValue = completeRows.reduce((max, row) => Math.max(max, getTemporalValue(row)), 0)
+
+        return `<div class="summary-card">
+          <div class="summary-value small">Hourly activity heatmap (local hour)</div>
+          <div class="muted small">${escapeHtml(valueLabel)} • Timezone: ${escapeHtml(localTimezoneName)}</div>
+          <div class="hourly-heatmap">
+            ${completeRows
+              .map((row) => {
+                const value = getTemporalValue(row)
+                const intensity = maxValue > 0 ? Math.round((value / maxValue) * 100) : 0
+                const title = `${row.key}:00 — ${value.toLocaleString()} ${valueLabel.toLowerCase()}`
+                return `<div class="heatmap-cell" style="--intensity:${intensity}%" title="${escapeHtml(title)}">
+                  <div class="heatmap-hour">${escapeHtml(row.key)}</div>
+                  <div class="heatmap-value">${escapeHtml(value.toLocaleString())}</div>
+                </div>`
+              })
+              .join('')}
+          </div>
+        </div>`
       }
 
       function formatCurrencyAmount(amount, currency) {
@@ -542,6 +636,10 @@
         const attachmentBytes = Number(metrics.attachments?.totalBytes || 0)
         const topAttachmentTypes = Array.isArray(metrics.attachments?.topFileTypes) ? metrics.attachments.topFileTypes : []
         const availabilityNotes = Array.isArray(metrics.dataAvailabilityNotes) ? metrics.dataAvailabilityNotes : []
+        const topHour = getTopTemporalEntry(metrics.activeHours)
+        const topMonth = getTopTemporalEntry(metrics.activeMonths)
+        const topYear = getTopTemporalEntry(metrics.activeYears)
+        const metricLabel = getTemporalMetricLabel()
 
         const topAttachmentRows = topAttachmentTypes.length
           ? topAttachmentTypes
@@ -574,6 +672,40 @@
               <div class="summary-value">${escapeHtml(attachmentCount.toLocaleString())}</div>
               <div class="muted small">Total size: ${escapeHtml(formatBytes(attachmentBytes))}</div>
             </div>
+          </div>
+
+          <div class="card-header-row">
+            <h3 class="card-title">Activity patterns (local time)</h3>
+            <div class="segmented-toggle" role="group" aria-label="Dashboard chart metric mode">
+              <button class="toggle-button ${state.dashboardMetricMode === 'messages' ? 'active' : ''}" type="button" data-dashboard-metric="messages">Messages</button>
+              <button class="toggle-button ${state.dashboardMetricMode === 'characters' ? 'active' : ''}" type="button" data-dashboard-metric="characters">Characters</button>
+            </div>
+          </div>
+
+          <div class="analytics-kpi-grid">
+            <div class="summary-card">
+              <div class="muted small">Peak hour</div>
+              <div class="summary-value">${escapeHtml(topHour?.label || 'n/a')}</div>
+              <div class="muted small">${escapeHtml(topHour ? `${getTemporalValue(topHour).toLocaleString()} ${metricLabel.toLowerCase()}` : 'No activity')}</div>
+            </div>
+            <div class="summary-card">
+              <div class="muted small">Peak month</div>
+              <div class="summary-value">${escapeHtml(topMonth?.label || 'n/a')}</div>
+              <div class="muted small">${escapeHtml(topMonth ? `${getTemporalValue(topMonth).toLocaleString()} ${metricLabel.toLowerCase()}` : 'No activity')}</div>
+            </div>
+            <div class="summary-card">
+              <div class="muted small">Peak year</div>
+              <div class="summary-value">${escapeHtml(topYear?.label || 'n/a')}</div>
+              <div class="muted small">${escapeHtml(topYear ? `${getTemporalValue(topYear).toLocaleString()} ${metricLabel.toLowerCase()}` : 'No activity')}</div>
+            </div>
+          </div>
+
+          ${renderHourlyHeatmap(metrics.activeHours)}
+
+          <div class="top-rankings-grid">
+            ${renderTimeSeriesBarChart('ISO weekly trend', metrics.activeWeeks, { emptyLabel: 'No weekly activity yet.' })}
+            ${renderTimeSeriesBarChart('Monthly trend', metrics.activeMonths, { emptyLabel: 'No monthly activity yet.' })}
+            ${renderTimeSeriesBarChart('Yearly trend', metrics.activeYears, { emptyLabel: 'No yearly activity yet.' })}
           </div>
 
           <details class="data-details" open>
@@ -935,6 +1067,15 @@
       premiumModeGraphEl.addEventListener('click', () => {
         setPremiumHistoryMode('graph')
         renderPremiumHistory()
+      })
+
+      timelineEl.addEventListener('click', (event) => {
+        const metricToggle = event.target.closest('[data-dashboard-metric]')
+        if (!metricToggle) {
+          return
+        }
+        setDashboardMetricMode(metricToggle.dataset.dashboardMetric)
+        renderTranscriptDisabled()
       })
 
       selectPackageButton.addEventListener('click', async () => {
