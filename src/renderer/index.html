@@ -14,7 +14,11 @@
     <header class="header">
       <h1 class="header-title">Discord Analytics Dashboard</h1>
       <div class="top-actions">
-        <button id="selectPackageButton" class="button" type="button">Import ZIP</button>
+        <select id="importModeSelect" aria-label="Import mode">
+          <option value="zip">Import ZIP</option>
+          <option value="folder">Import Extracted Folder</option>
+        </select>
+        <button id="selectPackageButton" class="button" type="button">Import</button>
         <button id="cancelImportButton" class="button button-secondary" type="button" disabled>Cancel</button>
         <span id="statusBadge" class="status-badge status-idle">Idle</span>
         <span id="versions" class="muted small"></span>
@@ -139,6 +143,7 @@
     <script>
       const versionsEl = document.getElementById('versions')
       const importStatusEl = document.getElementById('importStatus')
+      const importModeSelect = document.getElementById('importModeSelect')
       const selectPackageButton = document.getElementById('selectPackageButton')
       const cancelImportButton = document.getElementById('cancelImportButton')
       const channelListEl = document.getElementById('channelList')
@@ -198,7 +203,7 @@
       }
       const IMPORT_STATUS_MESSAGES = {
         [IMPORT_STATES.IDLE]: 'No package selected.',
-        [IMPORT_STATES.SELECTING_FILE]: 'Select a Discord ZIP export to continue.',
+        [IMPORT_STATES.SELECTING_FILE]: 'Select a Discord export source to continue.',
         [IMPORT_STATES.EXTRACTING_ZIP]: 'Extracting archive contents...',
         [IMPORT_STATES.SCANNING_FILES]: 'Scanning extracted files for supported Discord sections...',
         [IMPORT_STATES.PARSING]: 'Parsing export files...',
@@ -239,6 +244,8 @@
         parserProgress: null,
         stallInfo: null,
         stallDiagnostics: [],
+        importSourceType: 'zip',
+        selectedSourcePath: null,
         selectedZipPath: null,
         isParsing: false,
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
@@ -264,6 +271,11 @@
           Boolean(state.latestImportId)
         cancelImportButton.disabled = !actionable
         selectPackageButton.disabled = actionable
+        importModeSelect.disabled = actionable
+      }
+
+      function getImportModeLabel(importSourceType) {
+        return importSourceType === 'folder' ? 'Extracted folder' : 'ZIP archive'
       }
 
       function applyImportFlowState(nextState, message) {
@@ -1260,18 +1272,25 @@
           return
         }
         state.latestImportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        state.importSourceType = importModeSelect.value === 'folder' ? 'folder' : 'zip'
         state.isParsing = true
         state.parserProgress = null
         state.stallInfo = null
         state.stallDiagnostics = []
         stallDebugDetailsEl.open = false
-        applyImportFlowState(IMPORT_STATES.SELECTING_FILE)
+        applyImportFlowState(
+          IMPORT_STATES.SELECTING_FILE,
+          `Select ${state.importSourceType === 'folder' ? 'an extracted Discord export folder' : 'a Discord ZIP export'} to continue.`,
+        )
         renderTopRankings()
         render()
 
         try {
           console.debug('[ddp][renderer] import invoke:start', { importId: state.latestImportId })
-          const importResult = await window.ddpApi.selectImportSource({ importId: state.latestImportId })
+          const importResult = await window.ddpApi.selectImportSource({
+            importId: state.latestImportId,
+            importSourceType: state.importSourceType,
+          })
           console.debug('[ddp][renderer] import invoke:result', importResult)
 
           if (!importResult) {
@@ -1281,6 +1300,8 @@
 
           state.latestImportId = importResult.importId || state.latestImportId
           state.importMeta = importResult
+          state.importSourceType = importResult.importSourceType || state.importSourceType
+          state.selectedSourcePath = importResult.selectedSourcePath || state.selectedSourcePath
           state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
           state.parserMetadata = {}
 
@@ -1311,7 +1332,7 @@
 
           applyImportFlowState(
             IMPORT_STATES.COMPLETED,
-            `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
+            `${getImportModeLabel(state.importSourceType)} import from ${state.selectedSourcePath || 'selected source'} completed with analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`,
           )
           await loadParsedData()
         } catch (error) {
@@ -1341,8 +1362,8 @@
       })
 
       retryImportButton.addEventListener('click', async () => {
-        if (!state.selectedZipPath) {
-          importStatusEl.textContent = 'Cannot retry because the original ZIP path is unavailable.'
+        if (!state.selectedSourcePath) {
+          importStatusEl.textContent = 'Cannot retry because the original source path is unavailable.'
           return
         }
 
@@ -1356,14 +1377,18 @@
         state.stallInfo = null
         state.stallDiagnostics = []
         stallDebugDetailsEl.open = false
-        applyImportFlowState(IMPORT_STATES.SELECTING_FILE, 'Retrying import with previously selected ZIP package.')
+        applyImportFlowState(
+          IMPORT_STATES.SELECTING_FILE,
+          `Retrying ${getImportModeLabel(state.importSourceType).toLowerCase()} import from previously selected source.`,
+        )
         render()
 
         try {
           console.debug('[ddp][renderer] retry import invoke:start', { importId: state.latestImportId })
           const importResult = await window.ddpApi.selectImportSource({
             importId: state.latestImportId,
-            zipPath: state.selectedZipPath,
+            importSourceType: state.importSourceType,
+            sourcePath: state.selectedSourcePath,
           })
           console.debug('[ddp][renderer] retry import invoke:result', importResult)
 
@@ -1374,6 +1399,8 @@
 
           state.latestImportId = importResult.importId || state.latestImportId
           state.importMeta = importResult
+          state.importSourceType = importResult.importSourceType || state.importSourceType
+          state.selectedSourcePath = importResult.selectedSourcePath || state.selectedSourcePath
           state.selectedZipPath = importResult.selectedZipPath || state.selectedZipPath
           if (!importResult.ok) {
             applyImportFlowState(importResult.canceled ? IMPORT_STATES.CANCELED : IMPORT_STATES.FAILED)
@@ -1414,7 +1441,11 @@
         state.isParsing = progress.progress.phase !== 'complete'
 
         if (progress.progress.message) {
-          importStatusEl.textContent = progress.progress.message
+          const sourceBits = [getImportModeLabel(state.importSourceType)]
+          if (state.selectedSourcePath) {
+            sourceBits.push(state.selectedSourcePath)
+          }
+          importStatusEl.textContent = `${progress.progress.message} (${sourceBits.join(' • ')})`
         }
 
         renderTopRankings()

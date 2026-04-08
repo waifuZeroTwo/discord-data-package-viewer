@@ -193,6 +193,8 @@ function createImportRuntime(importId, importHash, options = {}) {
   return {
     importId,
     importHash,
+    importSourceType: options.importSourceType || 'zip',
+    selectedSourcePath: options.selectedSourcePath || null,
     selectedZipPath: options.selectedZipPath || null,
     phaseTimeoutsMs,
     stallThresholdMs,
@@ -205,6 +207,34 @@ function createImportRuntime(importId, importHash, options = {}) {
     diagnostics: [],
     monitorInterval: null,
     parseAbortController: null,
+  }
+}
+
+function getSourceTypeLabel(importSourceType) {
+  return importSourceType === 'folder' ? 'Extracted folder' : 'ZIP archive'
+}
+
+async function preflightValidateImportSource(rootPath) {
+  const detectedSections = await detectSections(rootPath)
+  const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
+  const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
+  const warnings = []
+
+  if (detectedSections.length === 0) {
+    warnings.push(
+      'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
+    )
+  } else if (missingSections.length > 0) {
+    warnings.push(
+      `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
+    )
+  }
+
+  return {
+    detectedSections,
+    expectedSections,
+    missingSections,
+    warnings,
   }
 }
 
@@ -245,6 +275,8 @@ function startRuntimeMonitor(event, runtime) {
       thresholdMs: runtime.stallThresholdMs,
       maxDurationMs: phaseTimeoutMs,
       importId: runtime.importId,
+      importSourceType: runtime.importSourceType,
+      sourcePath: runtime.selectedSourcePath,
     }
     recordDiagnostic(runtime, diagnostic)
 
@@ -336,8 +368,11 @@ async function extractZipWithProgress(zipPath, outputDir, onProgress) {
 
 async function handleSelectZip(event, payload = {}) {
   const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const requestedImportSourceType = payload.importSourceType === 'folder' ? 'folder' : 'zip'
   console.debug('[ddp][main] dialog:select-zip invoke:start', {
     importId,
+    importSourceType: requestedImportSourceType,
+    hasSourcePath: typeof payload.sourcePath === 'string' && payload.sourcePath.trim().length > 0,
     hasZipPath: typeof payload.zipPath === 'string' && payload.zipPath.trim().length > 0,
   })
   if (activeImportRequest && activeImportRequest !== importId) {
@@ -365,31 +400,49 @@ async function handleSelectZip(event, payload = {}) {
   emitImportStatus(event, {
     importId,
     state: IMPORT_STATES.SELECTING_FILE,
-    message: 'Waiting for ZIP file selection.',
+    message: requestedImportSourceType === 'folder' ? 'Waiting for folder selection.' : 'Waiting for ZIP file selection.',
   })
 
   try {
-    let selectedZipPath = typeof payload.zipPath === 'string' && payload.zipPath.trim() ? payload.zipPath : null
-    if (!selectedZipPath) {
-      const { canceled, filePaths } = await dialog.showOpenDialog({
-        title: 'Select Discord Data Package',
-        properties: ['openFile'],
-        filters: [
-          { name: 'ZIP archive', extensions: ['zip'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      })
+    let selectedSourcePath = typeof payload.sourcePath === 'string' && payload.sourcePath.trim() ? payload.sourcePath : null
+    if (!selectedSourcePath && requestedImportSourceType === 'zip' && typeof payload.zipPath === 'string' && payload.zipPath.trim()) {
+      selectedSourcePath = payload.zipPath
+    }
+    if (!selectedSourcePath) {
+      const dialogOptions = requestedImportSourceType === 'folder'
+        ? {
+            title: 'Select Extracted Discord Export Folder',
+            properties: ['openDirectory'],
+          }
+        : {
+            title: 'Select Discord Data Package',
+            properties: ['openFile'],
+            filters: [
+              { name: 'ZIP archive', extensions: ['zip'] },
+              { name: 'All files', extensions: ['*'] },
+            ],
+          }
+
+      const { canceled, filePaths } = await dialog.showOpenDialog(dialogOptions)
       if (canceled || filePaths.length === 0) {
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.CANCELED,
-          message: 'Import canceled before file selection.',
+          message:
+            requestedImportSourceType === 'folder'
+              ? 'Import canceled before selecting a folder.'
+              : 'Import canceled before file selection.',
         })
         const canceledResponse = {
           ok: false,
           canceled: true,
           importId,
-          warnings: ['Import canceled before selecting a ZIP file.'],
+          importSourceType: requestedImportSourceType,
+          warnings: [
+            requestedImportSourceType === 'folder'
+              ? 'Import canceled before selecting an extracted folder.'
+              : 'Import canceled before selecting a ZIP file.',
+          ],
           detectedSections: [],
           parserSummary: {
             channelCount: 0,
@@ -399,7 +452,7 @@ async function handleSelectZip(event, payload = {}) {
         console.debug('[ddp][main] dialog:select-zip invoke:result', canceledResponse)
         return canceledResponse
       }
-      selectedZipPath = filePaths[0]
+      selectedSourcePath = filePaths[0]
     }
 
     const warnings = []
@@ -410,9 +463,14 @@ async function handleSelectZip(event, payload = {}) {
     await fs.mkdir(analyticsCacheRoot, { recursive: true })
 
     const rootPath = path.join(importsRoot, importId)
-    const importHash = await computeFileSha256(selectedZipPath)
+    const importHash =
+      requestedImportSourceType === 'folder'
+        ? await computeFolderFingerprint(selectedSourcePath)
+        : await computeFileSha256(selectedSourcePath)
     const runtime = createImportRuntime(importId, importHash, {
-      selectedZipPath,
+      importSourceType: requestedImportSourceType,
+      selectedSourcePath,
+      selectedZipPath: requestedImportSourceType === 'zip' ? selectedSourcePath : null,
       phaseTimeoutsMs: payload.phaseTimeoutsMs,
       stallThresholdMs: payload.stallThresholdMs,
     })
@@ -421,52 +479,46 @@ async function handleSelectZip(event, payload = {}) {
 
     try {
       const cachedAnalytics = await loadAnalyticsCache(analyticsCacheRoot, importHash)
-      await fs.mkdir(rootPath, { recursive: true })
-
-      setRuntimePhase(runtime, 'extracting')
-      emitImportStatus(event, {
-        importId,
-        state: IMPORT_STATES.EXTRACTING_ZIP,
-        message: 'Extracting ZIP archive.',
-      })
-      emitParserProgress(event, { importId, importHash }, {
-        phase: 'extracting',
-        percent: 0,
-        filesDone: 0,
-        message: 'Starting ZIP extraction.',
-      })
-      markRuntimeProgress(runtime)
-      await extractZipWithProgress(selectedZipPath, rootPath, (progress) => {
+      let parserRootPath = selectedSourcePath
+      if (requestedImportSourceType === 'zip') {
+        await fs.mkdir(rootPath, { recursive: true })
+        parserRootPath = rootPath
+        setRuntimePhase(runtime, 'extracting')
+        emitImportStatus(event, {
+          importId,
+          state: IMPORT_STATES.EXTRACTING_ZIP,
+          message: `Extracting ZIP archive from ${selectedSourcePath}.`,
+        })
+        emitParserProgress(event, { importId, importHash }, {
+          phase: 'extracting',
+          percent: 0,
+          filesDone: 0,
+          message: `Starting ZIP extraction from ${selectedSourcePath}.`,
+        })
         markRuntimeProgress(runtime)
-        emitParserProgress(event, { importId, importHash }, progress)
-      })
-      throwIfImportCanceled(runtime)
+        await extractZipWithProgress(selectedSourcePath, rootPath, (progress) => {
+          markRuntimeProgress(runtime)
+          emitParserProgress(event, { importId, importHash }, progress)
+        })
+        throwIfImportCanceled(runtime)
+      }
 
       setRuntimePhase(runtime, 'scanning')
       emitImportStatus(event, {
         importId,
         state: IMPORT_STATES.SCANNING_FILES,
-        message: 'Scanning extracted files for Discord sections.',
+        message: `Scanning ${getSourceTypeLabel(requestedImportSourceType)} at ${selectedSourcePath} for Discord sections.`,
       })
       emitParserProgress(event, { importId, importHash }, {
         phase: 'scanning',
-        message: 'Scanning extracted files for known sections.',
+        message: `Running preflight validation for ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()}.`,
       })
       markRuntimeProgress(runtime)
-      const detectedSections = await detectSections(rootPath)
+      const preflightValidation = await preflightValidateImportSource(parserRootPath)
+      const detectedSections = preflightValidation.detectedSections
       throwIfImportCanceled(runtime)
-      const expectedSections = KNOWN_SECTION_DETECTORS.map((item) => item.name)
-      const missingSections = expectedSections.filter((section) => !detectedSections.includes(section))
-
-      if (detectedSections.length === 0) {
-        warnings.push(
-          'No known Discord data sections were detected. Results are likely very limited and may be incomplete.',
-        )
-      } else if (missingSections.length > 0) {
-        warnings.push(
-          `Partial import: some expected export sections were not found (${missingSections.join(', ')}). Available sections were parsed.`,
-        )
-      }
+      const missingSections = preflightValidation.missingSections
+      warnings.push(...preflightValidation.warnings)
 
       let parsedExport
       if (cachedAnalytics) {
@@ -474,7 +526,7 @@ async function handleSelectZip(event, payload = {}) {
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.AGGREGATING,
-          message: 'Using cached analytics.',
+          message: `Using cached analytics for ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()} import.`,
         })
         parsedExport = cachedAnalytics
         markRuntimeProgress(runtime)
@@ -489,7 +541,7 @@ async function handleSelectZip(event, payload = {}) {
         emitImportStatus(event, {
           importId,
           state: IMPORT_STATES.PARSING,
-          message: 'Parsing Discord export files.',
+          message: `Parsing Discord export files from ${selectedSourcePath}.`,
         })
         const parseAbortController = new AbortController()
         runtime.parseAbortController = parseAbortController
@@ -509,7 +561,7 @@ async function handleSelectZip(event, payload = {}) {
             })
           }, 1500)
 
-          parsedExport = await parseDiscordExport(rootPath, {
+          parsedExport = await parseDiscordExport(parserRootPath, {
             sortDirection: 'asc',
             signal: parseAbortController.signal,
             onProgress: (progress) => {
@@ -541,15 +593,17 @@ async function handleSelectZip(event, payload = {}) {
       emitImportStatus(event, {
         importId,
         state: IMPORT_STATES.COMPLETED,
-        message: 'Import completed successfully.',
+        message: `Import completed successfully from ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()} source.`,
       })
       const successResponse = {
         ok: true,
         importId,
         importHash,
         cacheHit: Boolean(cachedAnalytics),
-        rootPath,
-        selectedZipPath,
+        rootPath: parserRootPath,
+        importSourceType: requestedImportSourceType,
+        selectedSourcePath,
+        selectedZipPath: requestedImportSourceType === 'zip' ? selectedSourcePath : null,
         warnings: [...warnings, ...parsedExport.warnings],
         detectedSections,
         missingSections,
@@ -578,7 +632,9 @@ async function handleSelectZip(event, payload = {}) {
           importId,
           importHash,
           rootPath,
-          selectedZipPath,
+          importSourceType: requestedImportSourceType,
+          selectedSourcePath,
+          selectedZipPath: requestedImportSourceType === 'zip' ? selectedSourcePath : null,
           stallDiagnostics: activeParserJobs.get(importId)?.diagnostics || [],
           warnings: ['Import cancelled before analytics indexing finished.'],
           detectedSections: [],
@@ -628,6 +684,33 @@ async function computeFileSha256(filePath) {
     stream.on('end', () => resolve(hash.digest('hex')))
     stream.on('error', reject)
   })
+}
+
+async function computeFolderFingerprint(rootPath) {
+  const hash = crypto.createHash('sha256')
+  hash.update(rootPath)
+
+  async function walk(currentPath) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true })
+    entries.sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name)
+      const relativePath = path.relative(rootPath, fullPath)
+      if (entry.isDirectory()) {
+        hash.update(`d:${relativePath}`)
+        await walk(fullPath)
+        continue
+      }
+      if (!entry.isFile()) {
+        continue
+      }
+      const stats = await fs.stat(fullPath)
+      hash.update(`f:${relativePath}:${stats.size}:${stats.mtimeMs}`)
+    }
+  }
+
+  await walk(rootPath)
+  return hash.digest('hex')
 }
 
 async function loadAnalyticsCache(cacheRoot, importHash) {
@@ -703,6 +786,8 @@ function handleCancelParserJob(_event, payload = {}) {
     type: 'cancel-requested',
     phase: runtime.currentPhase,
     elapsedMs: Date.now() - runtime.phaseStartedAtMs,
+    importSourceType: runtime.importSourceType,
+    sourcePath: runtime.selectedSourcePath,
   })
   return { ok: true, canceled: true, phase: runtime.currentPhase }
 }
