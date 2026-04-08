@@ -69,6 +69,57 @@ function buildEmojiAssetUrl(emoji) {
   return `https://cdn.discordapp.com/emojis/${emoji.customId}.${extension}?size=64&quality=lossless`
 }
 
+function buildEmojiKey(emoji) {
+  return emoji.type === 'custom' && emoji.customId
+    ? `custom:${emoji.customId}`
+    : `native:${emoji.unicode || emoji.raw || emoji.name || 'unknown'}`
+}
+
+function deriveEmojiContextKey(message) {
+  if (message.dmUserId || message.dmUserName) {
+    return `dm:${message.dmUserId || message.dmUserName}`
+  }
+  if (message.groupDmId || message.groupDmName) {
+    return `group:${message.groupDmId || message.groupDmName}`
+  }
+  return `channel:${message.channelId || 'unknown'}`
+}
+
+function upsertEmojiMetric(map, emoji, message, count) {
+  const key = buildEmojiKey(emoji)
+  const existing = map.get(key) || {
+    label: emoji.raw || emoji.unicode || emoji.name || 'emoji',
+    count: 0,
+    type: emoji.type,
+    name: emoji.name || emoji.unicode || 'emoji',
+    unicode: emoji.unicode || null,
+    customId: emoji.customId || null,
+    animated: Boolean(emoji.animated),
+    lastUsedTimestamp: null,
+    lastUsedEpochMs: Number.NaN,
+    contextKeys: new Set(),
+  }
+
+  existing.count += count
+  existing.contextKeys.add(deriveEmojiContextKey(message))
+  if (Number.isFinite(message.timestampEpochMs)) {
+    if (Number.isNaN(existing.lastUsedEpochMs) || message.timestampEpochMs > existing.lastUsedEpochMs) {
+      existing.lastUsedEpochMs = message.timestampEpochMs
+      existing.lastUsedTimestamp = message.timestamp || null
+    }
+  }
+
+  map.set(key, existing)
+}
+
+function finalizeEmojiRow(item) {
+  return {
+    ...item,
+    contextCount: item.contextKeys instanceof Set ? item.contextKeys.size : Number(item.contextCount) || 0,
+    assetUrl: buildEmojiAssetUrl(item),
+  }
+}
+
 function bumpMetric(map, key, label, increment = 1, extra = {}, characterIncrement = 0) {
   if (!key) {
     return
@@ -236,31 +287,11 @@ function createAnalyticsIndexer() {
       if (Array.isArray(message.emojiUsage)) {
         for (const emoji of message.emojiUsage) {
           const count = Number.isFinite(emoji.count) ? emoji.count : 1
-          const key =
-            emoji.type === 'custom' && emoji.customId
-              ? `custom:${emoji.customId}`
-              : `unicode:${emoji.unicode || emoji.raw || 'unknown'}`
-
-          const map = emoji.type === 'custom' && emoji.customId ? counters.customEmojis : counters.allEmojis
-          const allMap = counters.allEmojis
-
-          const label = emoji.raw || emoji.unicode || emoji.name || 'emoji'
-          bumpMetric(map, key, label, count, {
-            type: emoji.type,
-            name: emoji.name || emoji.unicode || 'emoji',
-            unicode: emoji.unicode || null,
-            customId: emoji.customId || null,
-            animated: Boolean(emoji.animated),
-          })
-          if (map !== allMap) {
-            bumpMetric(allMap, key, label, count, {
-              type: emoji.type,
-              name: emoji.name || emoji.unicode || 'emoji',
-              unicode: emoji.unicode || null,
-              customId: emoji.customId || null,
-              animated: Boolean(emoji.animated),
-            })
+          const isCustom = emoji.type === 'custom' && emoji.customId
+          if (isCustom) {
+            upsertEmojiMetric(counters.customEmojis, emoji, message, count)
           }
+          upsertEmojiMetric(counters.allEmojis, emoji, message, count)
         }
       }
 
@@ -277,14 +308,8 @@ function createAnalyticsIndexer() {
           key: 'characterCount',
           count: metrics.characterCount,
         },
-        topCustomEmojis: toTopList(counters.customEmojis).map((item) => ({
-          ...item,
-          assetUrl: buildEmojiAssetUrl(item),
-        })),
-        topEmojis: toTopList(counters.allEmojis).map((item) => ({
-          ...item,
-          assetUrl: buildEmojiAssetUrl(item),
-        })),
+        topCustomEmojis: toTopList(counters.customEmojis).map(finalizeEmojiRow),
+        topEmojis: toTopList(counters.allEmojis).map(finalizeEmojiRow),
         activeHours: toTopList(counters.activeHours, 24),
         activeWeeks: toTopList(counters.activeWeeks, 52),
         activeMonths: toTopList(counters.activeMonths, 120),
@@ -329,23 +354,43 @@ function createAnalyticsIndexer() {
     },
 
     getEmojiDatasets() {
-      const favoriteEmojis = toTopList(counters.allEmojis, 250).map((item) => ({
-        key: item.key,
-        type: item.type,
-        name: item.name,
-        unicode: item.unicode,
-        customId: item.customId,
-        animated: item.animated,
-        raw: item.label,
-        totalUses: item.count,
-        lastUsedTimestamp: null,
-        channelCount: null,
-        assetUrl: buildEmojiAssetUrl(item),
-      }))
+      const topCombined = toTopList(counters.allEmojis, 250).map((item) => {
+        const finalized = finalizeEmojiRow(item)
+        return {
+          key: finalized.key,
+          type: finalized.type,
+          name: finalized.name,
+          unicode: finalized.unicode,
+          customId: finalized.customId,
+          animated: finalized.animated,
+          raw: finalized.label,
+          totalUses: finalized.count,
+          lastUsedTimestamp: finalized.lastUsedTimestamp,
+          contextCount: finalized.contextCount,
+          assetUrl: finalized.assetUrl,
+        }
+      })
+
+      const topCustom = toTopList(counters.customEmojis, 250).map((item) => {
+        const finalized = finalizeEmojiRow(item)
+        return {
+          key: finalized.key,
+          type: finalized.type,
+          name: finalized.name,
+          unicode: finalized.unicode,
+          customId: finalized.customId,
+          animated: finalized.animated,
+          raw: finalized.label,
+          totalUses: finalized.count,
+          lastUsedTimestamp: finalized.lastUsedTimestamp,
+          contextCount: finalized.contextCount,
+          assetUrl: finalized.assetUrl,
+        }
+      })
 
       return {
-        favoriteEmojis,
-        recentEmojis: favoriteEmojis,
+        favoriteEmojis: topCustom,
+        recentEmojis: topCombined,
       }
     },
   }
