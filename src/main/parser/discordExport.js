@@ -836,39 +836,7 @@ function computeBillingSummary(transactions, giftedNitro) {
 }
 
 function getPaginatedParserOutput(parsedExport, options = {}) {
-  const channelPage = Math.max(1, Number(options.channelPage) || 1)
-  const channelPageSize = Math.max(1, Number(options.channelPageSize) || 25)
-  const messagePage = Math.max(1, Number(options.messagePage) || 1)
-  const messagePageSize = Math.max(1, Number(options.messagePageSize) || 200)
-
-  const channelStart = (channelPage - 1) * channelPageSize
-  const channelEnd = channelStart + channelPageSize
-  const channels = parsedExport.channels.slice(channelStart, channelEnd)
-
-  const messagesByChannel = {}
-  const messagePageInfoByChannel = {}
-
-  for (const channel of channels) {
-    const allMessages = parsedExport.messagesByChannel[channel.id] ?? []
-    const msgStart = (messagePage - 1) * messagePageSize
-    const msgEnd = msgStart + messagePageSize
-
-    messagesByChannel[channel.id] = allMessages.slice(msgStart, msgEnd).map((message) => ({
-      ...message,
-      timestampEpochMs: undefined,
-    }))
-
-    messagePageInfoByChannel[channel.id] = {
-      page: messagePage,
-      pageSize: messagePageSize,
-      totalMessages: allMessages.length,
-      hasMore: msgEnd < allMessages.length,
-    }
-  }
-
   return {
-    channels,
-    messagesByChannel,
     premiumHistory: parsedExport.premiumHistory ?? [],
     badges: parsedExport.badges ?? [],
     connections: parsedExport.connections ?? [],
@@ -886,14 +854,11 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
       summaryCurrency: null,
     },
     parserMetadata: parsedExport.parserMetadata ?? {},
-    warnings: parsedExport.warnings,
-    channelPageInfo: {
-      page: channelPage,
-      pageSize: channelPageSize,
-      totalChannels: parsedExport.channels.length,
-      hasMore: channelEnd < parsedExport.channels.length,
+    analyticsSummary: parsedExport.analyticsSummary ?? {
+      channelCount: 0,
+      messageCount: 0,
     },
-    messagePageInfoByChannel,
+    warnings: parsedExport.warnings,
   }
 }
 
@@ -915,8 +880,6 @@ async function parseDiscordExport(rootPath, options = {}) {
     jsonFiles = await collectJsonFiles(rootPath)
   } catch (error) {
     return {
-      channels: [],
-      messagesByChannel: {},
       premiumHistory: [],
       badges: [],
       connections: [],
@@ -924,6 +887,10 @@ async function parseDiscordExport(rootPath, options = {}) {
       giftedNitro: [],
       billingSummary: computeBillingSummary([], []),
       parserMetadata: {},
+      analyticsSummary: {
+        channelCount: 0,
+        messageCount: 0,
+      },
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -1113,9 +1080,9 @@ async function parseDiscordExport(rootPath, options = {}) {
     }
   }
 
+  const messageCount = Object.values(messagesByChannel).reduce((count, messages) => count + messages.length, 0)
+
   return {
-    channels,
-    messagesByChannel,
     premiumHistory,
     badges: dedupedBadges,
     connections: dedupedConnections,
@@ -1125,6 +1092,10 @@ async function parseDiscordExport(rootPath, options = {}) {
     giftedNitro: dedupedGiftedNitro,
     billingSummary,
     parserMetadata,
+    analyticsSummary: {
+      channelCount: channels.length,
+      messageCount,
+    },
     warnings,
     sortDirection,
   }

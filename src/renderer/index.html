@@ -7,12 +7,12 @@
       content="default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Discord Data Package Viewer</title>
+    <title>Discord Analytics Dashboard</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="header">
-      <h1 class="header-title">Discord Data Package Viewer</h1>
+      <h1 class="header-title">Discord Analytics Dashboard</h1>
       <div class="top-actions">
         <button id="selectPackageButton" class="button" type="button">Import ZIP</button>
         <span id="statusBadge" class="status-badge status-idle">Idle</span>
@@ -23,45 +23,22 @@
     <div class="layout">
       <aside class="sidebar">
         <section class="card">
-          <h2 class="card-title">Search & Filters</h2>
-          <div class="search-grid">
-            <div>
-              <label for="filterText">Message text</label>
-              <input id="filterText" type="search" placeholder="Search messages..." />
-            </div>
-            <div>
-              <label for="filterChannel">Channel</label>
-              <select id="filterChannel">
-                <option value="">All channels</option>
-              </select>
-            </div>
-            <div>
-              <label for="dateFrom">Date from (optional)</label>
-              <input id="dateFrom" type="date" />
-            </div>
-            <div>
-              <label for="dateTo">Date to (optional)</label>
-              <input id="dateTo" type="date" />
-            </div>
-            <div>
-              <label for="sortDirection">Sort order</label>
-              <select id="sortDirection">
-                <option value="asc">Oldest to newest</option>
-                <option value="desc">Newest to oldest</option>
-              </select>
-            </div>
-          </div>
+          <h2 class="card-title">Analytics Dashboard</h2>
+          <p class="muted small">
+            This app now focuses on analytics extraction only. Channel transcript browsing and full message timeline
+            rendering are disabled for performance and privacy.
+          </p>
         </section>
 
         <section class="card">
-          <h2 class="card-title">Channels</h2>
+          <h2 class="card-title">Transcript Viewer</h2>
           <ul id="channelList" class="channel-list"></ul>
         </section>
       </aside>
 
       <main class="content">
         <section class="card">
-          <h2 id="timelineTitle" class="card-title">Message Timeline</h2>
+          <h2 id="timelineTitle" class="card-title">Analytics Dashboard</h2>
           <p id="importStatus" class="muted small">No package selected.</p>
           <div id="nonBlockingWarnings" class="inline-warning-list"></div>
           <div id="timeline" class="timeline"></div>
@@ -131,11 +108,6 @@
       const versionsEl = document.getElementById('versions')
       const importStatusEl = document.getElementById('importStatus')
       const selectPackageButton = document.getElementById('selectPackageButton')
-      const sortDirectionEl = document.getElementById('sortDirection')
-      const filterTextEl = document.getElementById('filterText')
-      const filterChannelEl = document.getElementById('filterChannel')
-      const dateFromEl = document.getElementById('dateFrom')
-      const dateToEl = document.getElementById('dateTo')
       const channelListEl = document.getElementById('channelList')
       const timelineEl = document.getElementById('timeline')
       const timelineTitleEl = document.getElementById('timelineTitle')
@@ -167,9 +139,6 @@
       const state = {
         latestImportId: null,
         importMeta: null,
-        channels: [],
-        messagesByChannel: {},
-        selectedChannelId: '',
         status: 'idle',
         premiumHistory: [],
         badges: [],
@@ -212,63 +181,6 @@
           .replaceAll('>', '&gt;')
           .replaceAll('"', '&quot;')
           .replaceAll("'", '&#39;')
-      }
-
-      function isImageAttachment(attachment) {
-        const target = attachment?.filename || attachment?.url || ''
-        return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(target)
-      }
-
-      function messageInDateRange(message, fromDate, toDate) {
-        if (!message?.timestamp) {
-          return true
-        }
-
-        const epoch = Date.parse(message.timestamp)
-        if (Number.isNaN(epoch)) {
-          return true
-        }
-
-        if (fromDate) {
-          const fromEpoch = Date.parse(`${fromDate}T00:00:00`)
-          if (!Number.isNaN(fromEpoch) && epoch < fromEpoch) {
-            return false
-          }
-        }
-
-        if (toDate) {
-          const toEpoch = Date.parse(`${toDate}T23:59:59.999`)
-          if (!Number.isNaN(toEpoch) && epoch > toEpoch) {
-            return false
-          }
-        }
-
-        return true
-      }
-
-      function getVisibleChannels() {
-        const channelFilter = filterChannelEl.value
-        if (!channelFilter) {
-          return state.channels
-        }
-
-        return state.channels.filter((channel) => channel.id === channelFilter)
-      }
-
-      function getFilteredMessages(channelId) {
-        const messages = state.messagesByChannel[channelId] || []
-        const searchTerm = filterTextEl.value.trim().toLowerCase()
-        const fromDate = dateFromEl.value
-        const toDate = dateToEl.value
-
-        return messages.filter((message) => {
-          const matchesText =
-            !searchTerm ||
-            message.content.toLowerCase().includes(searchTerm) ||
-            message.author.toLowerCase().includes(searchTerm)
-
-          return matchesText && messageInDateRange(message, fromDate, toDate)
-        })
       }
 
       function formatTimestampForDisplay(timestamp) {
@@ -578,33 +490,20 @@
         renderPanelDataDetails(connectionsDetailsEl, 'Connections', state.parserMetadata.connections)
       }
 
-      function renderChannelList() {
-        const visibleChannels = getVisibleChannels()
+      function renderTranscriptDisabled() {
+        channelListEl.innerHTML =
+          '<li class="muted small">Transcript channel listing is disabled in analytics-only mode.</li>'
 
-        if (visibleChannels.length === 0) {
-          channelListEl.innerHTML = '<li class="muted small">No channels match current filters.</li>'
+        timelineTitleEl.textContent = 'Analytics Dashboard'
+
+        if (!state.latestImportId) {
+          timelineEl.innerHTML =
+            '<div class="state">Import a ZIP package to load analytics panels and dashboard summaries.</div>'
           return
         }
 
-        if (!visibleChannels.some((item) => item.id === state.selectedChannelId)) {
-          state.selectedChannelId = visibleChannels[0].id
-        }
-
-        channelListEl.innerHTML = visibleChannels
-          .map((channel) => {
-            const count = getFilteredMessages(channel.id).length
-            const activeClass = channel.id === state.selectedChannelId ? 'active' : ''
-
-            return `
-              <li>
-                <button class="channel-item ${activeClass}" type="button" data-channel-id="${escapeHtml(channel.id)}">
-                  <div># ${escapeHtml(channel.name)}</div>
-                  <div class="muted small">${escapeHtml(channel.type)} • ${count} shown</div>
-                </button>
-              </li>
-            `
-          })
-          .join('')
+        timelineEl.innerHTML =
+          '<div class="state">Full channel timelines are disabled. Use the analytics panels below for insights.</div>'
       }
 
       function renderEmojiChip(emoji) {
@@ -786,79 +685,8 @@
         renderPanelDataDetails(billingDetailsEl, 'Billing', state.parserMetadata.billing)
       }
 
-      function renderTimeline() {
-        if (!state.latestImportId) {
-          timelineTitleEl.textContent = 'Message Timeline'
-          timelineEl.innerHTML = '<div class="state">Import a ZIP package to view channels and messages.</div>'
-          return
-        }
-
-        if (!state.importMeta?.ok) {
-          const warningLines = (state.importMeta?.warnings || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')
-          timelineEl.innerHTML = `
-            <div class="state error">
-              <p>Import failed or archive is missing required Discord sections.</p>
-              <ul>${warningLines || '<li>No additional details available.</li>'}</ul>
-            </div>
-          `
-          return
-        }
-
-        const activeChannel = state.channels.find((channel) => channel.id === state.selectedChannelId)
-        if (!activeChannel) {
-          timelineEl.innerHTML = '<div class="state">No channel selected.</div>'
-          return
-        }
-
-        const filteredMessages = getFilteredMessages(activeChannel.id)
-        timelineTitleEl.textContent = `Message Timeline · #${activeChannel.name}`
-
-        if (filteredMessages.length === 0) {
-          timelineEl.innerHTML = '<div class="state">No messages matched the current search/filter criteria.</div>'
-          return
-        }
-
-        timelineEl.innerHTML = filteredMessages
-          .map((message) => {
-            const hasAttachments = message.attachments && message.attachments.length > 0
-            const timestamp = message.timestamp
-              ? timestampFormatter.format(new Date(message.timestamp))
-              : 'Unknown time'
-
-            const attachmentsHtml = hasAttachments
-              ? `<div class="attachments">${message.attachments
-                  .map((attachment) => {
-                    const label = attachment.filename || 'Attachment'
-                    const link = attachment.url
-                      ? `<a href="${escapeHtml(attachment.url)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`
-                      : `<span>${escapeHtml(label)}</span>`
-                    const preview =
-                      attachment.url && isImageAttachment(attachment)
-                        ? `<img src="${escapeHtml(attachment.url)}" alt="${escapeHtml(label)}" loading="lazy" />`
-                        : ''
-
-                    return `<div class="attachment">${link}${preview}</div>`
-                  })
-                  .join('')}</div>`
-              : ''
-
-            return `
-              <article class="message">
-                <header class="message-header">
-                  <span class="message-author">${escapeHtml(message.author)}</span>
-                  <time class="message-time">${escapeHtml(timestamp)}</time>
-                </header>
-                <div class="message-content">${escapeHtml(message.content || '(no text content)')}</div>
-                ${attachmentsHtml}
-              </article>
-            `
-          })
-          .join('')
-      }
-
       function render() {
-        renderChannelList()
-        renderTimeline()
+        renderTranscriptDisabled()
         renderBadges()
         renderConnections()
         renderEmojiPanels()
@@ -888,30 +716,13 @@
         }
       }
 
-      function syncFilterChannelOptions() {
-        const existingValue = filterChannelEl.value
-        filterChannelEl.innerHTML = '<option value="">All channels</option>'
-        for (const channel of state.channels) {
-          filterChannelEl.innerHTML += `<option value="${escapeHtml(channel.id)}"># ${escapeHtml(channel.name)}</option>`
-        }
-
-        if (state.channels.some((item) => item.id === existingValue)) {
-          filterChannelEl.value = existingValue
-        }
-      }
-
       async function loadParsedData() {
         if (!state.latestImportId) {
           return
         }
 
-        const parserPage = await window.ddpApi.getParserPage({
+        const parserPage = await window.ddpApi.getParserAnalytics({
           importId: state.latestImportId,
-          channelPage: 1,
-          channelPageSize: 1000,
-          messagePage: 1,
-          messagePageSize: 5000,
-          sortDirection: sortDirectionEl.value,
         })
 
         if (!parserPage.ok) {
@@ -919,8 +730,6 @@
             ok: false,
             warnings: parserPage.warnings || ['Unable to load parsed data.'],
           }
-          state.channels = []
-          state.messagesByChannel = {}
           state.premiumHistory = []
           state.badges = []
           state.connections = []
@@ -943,8 +752,6 @@
           return
         }
 
-        state.channels = parserPage.channels || []
-        state.messagesByChannel = parserPage.messagesByChannel || {}
         state.premiumHistory = parserPage.premiumHistory || []
         state.badges = parserPage.badges || []
         state.connections = parserPage.connections || []
@@ -954,21 +761,9 @@
         state.giftedNitro = parserPage.giftedNitro || []
         state.billingSummary = parserPage.billingSummary || state.billingSummary
         state.parserMetadata = parserPage.parserMetadata || {}
-        if (!state.selectedChannelId && state.channels.length > 0) {
-          state.selectedChannelId = state.channels[0].id
-        }
-
-        syncFilterChannelOptions()
         syncBillingFilterOptions()
         setStatus('ready', 'Ready')
         render()
-      }
-
-      sortDirectionEl.addEventListener('change', loadParsedData)
-
-      for (const element of [filterTextEl, filterChannelEl, dateFromEl, dateToEl]) {
-        element.addEventListener('input', render)
-        element.addEventListener('change', render)
       }
 
       for (const element of [billingTypeFilterEl, billingStatusFilterEl]) {
@@ -986,16 +781,6 @@
         renderPremiumHistory()
       })
 
-      channelListEl.addEventListener('click', (event) => {
-        const button = event.target.closest('button[data-channel-id]')
-        if (!button) {
-          return
-        }
-
-        state.selectedChannelId = button.dataset.channelId
-        render()
-      })
-
       selectPackageButton.addEventListener('click', async () => {
         setStatus('loading', 'Loading')
         importStatusEl.textContent = 'Importing archive...'
@@ -1010,7 +795,6 @@
 
         state.latestImportId = importResult.importId
         state.importMeta = importResult
-        state.selectedChannelId = ''
         state.parserMetadata = {}
 
         if (!importResult.ok) {
@@ -1025,7 +809,7 @@
           return
         }
 
-        importStatusEl.textContent = `Imported ${importResult.parserSummary.channelCount} channels, ${importResult.parserSummary.messageCount} messages.`
+        importStatusEl.textContent = `Imported archive and extracted analytics from ${importResult.parserSummary.channelCount} channels and ${importResult.parserSummary.messageCount} messages.`
         await loadParsedData()
       })
 
