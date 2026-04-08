@@ -4,6 +4,7 @@ const {
   extractPremiumEventsFromPayload,
   normalizePremiumEventsToIntervals,
 } = require('./premiumHistory')
+const { mapLegacyBadge, mapPremiumType, mapPublicFlags } = require('../../shared/badges')
 
 const DEFAULT_SORT_DIRECTION = 'asc'
 
@@ -185,6 +186,69 @@ function sortMessages(messages, sortDirection) {
   })
 }
 
+function extractBadgeCandidates(payload, jsonPath, sink = []) {
+  if (!payload || typeof payload !== 'object') {
+    return sink
+  }
+
+  if (Array.isArray(payload)) {
+    payload.forEach((entry) => extractBadgeCandidates(entry, jsonPath, sink))
+    return sink
+  }
+
+  const hasBadgeKeys =
+    payload.public_flags !== undefined ||
+    payload.publicFlags !== undefined ||
+    payload.flags !== undefined ||
+    payload.premium_type !== undefined ||
+    payload.premiumType !== undefined ||
+    Array.isArray(payload.badges) ||
+    Array.isArray(payload.legacy_badges) ||
+    Array.isArray(payload.event_badges)
+
+  if (hasBadgeKeys) {
+    sink.push({ candidate: payload, jsonPath })
+  }
+
+  for (const value of Object.values(payload)) {
+    if (value && typeof value === 'object') {
+      extractBadgeCandidates(value, jsonPath, sink)
+    }
+  }
+
+  return sink
+}
+
+function extractBadgesFromPayload(payload, jsonPath) {
+  const badgeCandidates = extractBadgeCandidates(payload, jsonPath)
+  const badges = []
+
+  for (const { candidate } of badgeCandidates) {
+    badges.push(...mapPublicFlags(candidate.public_flags ?? candidate.publicFlags ?? candidate.flags))
+    badges.push(...mapPremiumType(candidate.premium_type ?? candidate.premiumType))
+
+    const legacyCollections = [candidate.badges, candidate.legacy_badges, candidate.event_badges]
+    for (const collection of legacyCollections) {
+      if (!Array.isArray(collection)) {
+        continue
+      }
+
+      for (const entry of collection) {
+        const rawValue =
+          entry && typeof entry === 'object'
+            ? entry.id ?? entry.code ?? entry.name ?? entry.badge ?? entry.value
+            : entry
+        const mapped = mapLegacyBadge(rawValue)
+        if (mapped) {
+          badges.push(mapped)
+        }
+      }
+    }
+  }
+
+  return badges.map((badge) => ({ ...badge, source: jsonPath }))
+}
+
 function getPaginatedParserOutput(parsedExport, options = {}) {
   const channelPage = Math.max(1, Number(options.channelPage) || 1)
   const channelPageSize = Math.max(1, Number(options.channelPageSize) || 25)
@@ -220,6 +284,7 @@ function getPaginatedParserOutput(parsedExport, options = {}) {
     channels,
     messagesByChannel,
     premiumHistory: parsedExport.premiumHistory ?? [],
+    badges: parsedExport.badges ?? [],
     warnings: parsedExport.warnings,
     channelPageInfo: {
       page: channelPage,
@@ -237,6 +302,7 @@ async function parseDiscordExport(rootPath, options = {}) {
   const messagesByChannel = {}
   const sortDirection = normalizeSortDirection(options.sortDirection)
   const premiumEvents = []
+  const badges = []
 
   let jsonFiles = []
 
@@ -247,6 +313,7 @@ async function parseDiscordExport(rootPath, options = {}) {
       channels: [],
       messagesByChannel: {},
       premiumHistory: [],
+      badges: [],
       warnings: [`Failed to scan extracted archive: ${error.message}`],
       sortDirection,
     }
@@ -283,6 +350,7 @@ async function parseDiscordExport(rootPath, options = {}) {
     }
 
     premiumEvents.push(...extractPremiumEventsFromPayload(payload, jsonPath, warnings))
+    badges.push(...extractBadgesFromPayload(payload, jsonPath))
 
     const messages = maybeExtractMessages(payload, jsonPath, warnings)
     for (const message of messages) {
@@ -308,11 +376,20 @@ async function parseDiscordExport(rootPath, options = {}) {
 
   const channels = Array.from(channelsById.values()).sort((a, b) => a.name.localeCompare(b.name))
   const premiumHistory = normalizePremiumEventsToIntervals(premiumEvents, warnings)
+  const dedupedBadges = Array.from(
+    new Map(
+      badges.map((badge) => [
+        `${badge.sourceType}:${badge.rawValue}:${badge.displayName}:${badge.iconKey}`,
+        badge,
+      ]),
+    ).values(),
+  ).sort((a, b) => a.displayName.localeCompare(b.displayName))
 
   return {
     channels,
     messagesByChannel,
     premiumHistory,
+    badges: dedupedBadges,
     warnings,
     sortDirection,
   }

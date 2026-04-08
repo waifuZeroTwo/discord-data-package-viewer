@@ -67,6 +67,11 @@
         </section>
 
         <section class="card">
+          <h2 class="card-title">Badges</h2>
+          <div id="badgePanel" class="badge-panel"></div>
+        </section>
+
+        <section class="card">
           <div class="card-header-row">
             <h2 class="card-title">Premium History</h2>
             <div class="segmented-toggle" role="group" aria-label="Premium history view mode">
@@ -93,6 +98,7 @@
       const timelineTitleEl = document.getElementById('timelineTitle')
       const statusBadgeEl = document.getElementById('statusBadge')
       const premiumHistoryEl = document.getElementById('premiumHistory')
+      const badgePanelEl = document.getElementById('badgePanel')
       const premiumModeTextEl = document.getElementById('premiumModeText')
       const premiumModeGraphEl = document.getElementById('premiumModeGraph')
 
@@ -109,6 +115,7 @@
         selectedChannelId: '',
         status: 'idle',
         premiumHistory: [],
+        badges: [],
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -312,6 +319,54 @@
         renderPremiumHistoryText()
       }
 
+      function getBadgeIcon(iconKey) {
+        const icons = {
+          staff: '🛡️',
+          partner: '🤝',
+          hypesquad_events: '🎪',
+          hypesquad_bravery: '🦁',
+          hypesquad_brilliance: '🧠',
+          hypesquad_balance: '⚖️',
+          bug_hunter_1: '🐛',
+          bug_hunter_2: '🐞',
+          early_supporter: '🌟',
+          verified_bot_developer: '🤖',
+          certified_moderator: '🧭',
+          bot_http_interactions: '🛰️',
+          active_developer: '🧑‍💻',
+          nitro: '⚡',
+          nitro_classic: '💎',
+          nitro_basic: '✨',
+          unknown: '❔',
+        }
+
+        return icons[iconKey] || icons.unknown
+      }
+
+      function renderBadges() {
+        if (!state.latestImportId || !state.importMeta?.ok) {
+          badgePanelEl.innerHTML = '<div class="muted small">Import a package to view badges.</div>'
+          return
+        }
+
+        if (!Array.isArray(state.badges) || state.badges.length === 0) {
+          badgePanelEl.innerHTML = '<div class="muted small">No badge or flag metadata found in this export.</div>'
+          return
+        }
+
+        badgePanelEl.innerHTML = state.badges
+          .map((badge) => {
+            const tooltip = badge.description || 'No description available.'
+            const source = badge.source ? ` • Source: ${badge.source}` : ''
+            const title = `${tooltip}${source}`
+            return `<span class="badge-chip" title="${escapeHtml(title)}">
+              <span class="badge-icon" aria-hidden="true">${escapeHtml(getBadgeIcon(badge.iconKey))}</span>
+              <span>${escapeHtml(badge.displayName)}</span>
+            </span>`
+          })
+          .join('')
+      }
+
       function renderChannelList() {
         const visibleChannels = getVisibleChannels()
 
@@ -414,6 +469,7 @@
       function render() {
         renderChannelList()
         renderTimeline()
+        renderBadges()
         renderPremiumHistory()
 
         if (state.importMeta?.warnings?.length) {
@@ -455,6 +511,7 @@
           state.channels = []
           state.messagesByChannel = {}
           state.premiumHistory = []
+          state.badges = []
           setStatus('error', 'Error')
           render()
           return
@@ -463,6 +520,7 @@
         state.channels = parserPage.channels || []
         state.messagesByChannel = parserPage.messagesByChannel || {}
         state.premiumHistory = parserPage.premiumHistory || []
+        state.badges = parserPage.badges || []
         if (!state.selectedChannelId && state.channels.length > 0) {
           state.selectedChannelId = state.channels[0].id
         }
