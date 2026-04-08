@@ -67,7 +67,8 @@
         margin-bottom: 16px;
       }
 
-      button {
+      button,
+      select {
         background: var(--accent);
         color: white;
         border: 0;
@@ -75,6 +76,11 @@
         padding: 10px 14px;
         font-size: 14px;
         cursor: pointer;
+      }
+
+      select {
+        margin-top: 8px;
+        width: 100%;
       }
 
       button:hover {
@@ -105,6 +111,11 @@
           <h2>Import</h2>
           <p class="muted">Open a Discord data package archive to begin parsing.</p>
           <button id="selectPackageButton" type="button">Select ZIP package</button>
+          <label class="muted" for="sortDirection">Message sort order</label>
+          <select id="sortDirection">
+            <option value="asc">Oldest to newest</option>
+            <option value="desc">Newest to oldest</option>
+          </select>
         </section>
 
         <section class="card">
@@ -117,7 +128,7 @@
         <section class="card">
           <h2>Parsed Discord Data</h2>
           <p class="muted">
-            Parsed output will appear here once a package is imported and processed.
+            Parsed output is fetched from the main process in paginated channel/message chunks.
           </p>
           <pre id="dataPreview">{ "summary": "No data loaded" }</pre>
         </section>
@@ -129,9 +140,31 @@
       const importStatusEl = document.getElementById('importStatus')
       const dataPreviewEl = document.getElementById('dataPreview')
       const selectPackageButton = document.getElementById('selectPackageButton')
+      const sortDirectionEl = document.getElementById('sortDirection')
 
       const versions = window.ddpApi.getRuntimeVersions()
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
+
+      let latestImportId = null
+
+      async function loadFirstParserPage() {
+        if (!latestImportId) {
+          return
+        }
+
+        const parserPage = await window.ddpApi.getParserPage({
+          importId: latestImportId,
+          channelPage: 1,
+          channelPageSize: 25,
+          messagePage: 1,
+          messagePageSize: 200,
+          sortDirection: sortDirectionEl.value,
+        })
+
+        dataPreviewEl.textContent = JSON.stringify(parserPage, null, 2)
+      }
+
+      sortDirectionEl.addEventListener('change', loadFirstParserPage)
 
       selectPackageButton.addEventListener('click', async () => {
         const importResult = await window.ddpApi.selectZip()
@@ -141,13 +174,15 @@
           return
         }
 
+        latestImportId = importResult.importId
+
         if (!importResult.ok) {
           importStatusEl.textContent = 'Import completed with issues. Review warnings.'
         } else {
           importStatusEl.textContent = `Imported package: ${importResult.importId}`
         }
 
-        dataPreviewEl.textContent = JSON.stringify(importResult, null, 2)
+        await loadFirstParserPage()
       })
     </script>
   </body>

@@ -2,10 +2,15 @@ const path = require('path')
 const fs = require('fs/promises')
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const extract = require('extract-zip')
+const {
+  parseDiscordExport,
+  getPaginatedParserOutput,
+} = require('./src/main/parser/discordExport')
 
 const IMPORTS_SUBDIR = 'imports'
 const IMPORT_RETENTION_MS = 1000 * 60 * 60 * 24 * 7
 const IMPORT_MAX_COUNT = 10
+const parsedArchiveCache = new Map()
 
 const KNOWN_SECTION_DETECTORS = [
   {
@@ -82,6 +87,7 @@ async function cleanupOldImports(importsRoot) {
 
   for (const importDir of importDirs.filter((item) => item.isExpired)) {
     await fs.rm(importDir.fullPath, { recursive: true, force: true })
+    parsedArchiveCache.delete(path.basename(importDir.fullPath))
   }
 
   const recentImports = importDirs.filter((item) => !item.isExpired)
@@ -93,6 +99,7 @@ async function cleanupOldImports(importsRoot) {
   const dirsToDelete = recentImports.slice(0, recentImports.length - IMPORT_MAX_COUNT)
   for (const importDir of dirsToDelete) {
     await fs.rm(importDir.fullPath, { recursive: true, force: true })
+    parsedArchiveCache.delete(path.basename(importDir.fullPath))
   }
 }
 
@@ -109,6 +116,14 @@ async function detectSections(rootPath) {
   }
 
   return detectedSections
+}
+
+function getCachedParse(importId) {
+  if (!importId || !parsedArchiveCache.has(importId)) {
+    return null
+  }
+
+  return parsedArchiveCache.get(importId)
 }
 
 async function handleSelectZip() {
@@ -146,6 +161,10 @@ async function handleSelectZip() {
       rootPath,
       warnings: [`Failed to extract ZIP archive: ${error.message}`],
       detectedSections: [],
+      parserSummary: {
+        channelCount: 0,
+        messageCount: 0,
+      },
     }
   }
 
@@ -157,18 +176,84 @@ async function handleSelectZip() {
     )
   }
 
+  const parsedExport = await parseDiscordExport(rootPath, { sortDirection: 'asc' })
+  parsedArchiveCache.set(importId, parsedExport)
+
+  const messageCount = Object.values(parsedExport.messagesByChannel).reduce(
+    (count, messages) => count + messages.length,
+    0,
+  )
+
   return {
     ok: detectedSections.length > 0,
     importId,
     rootPath,
-    warnings,
+    warnings: [...warnings, ...parsedExport.warnings],
     detectedSections,
+    parserSummary: {
+      channelCount: parsedExport.channels.length,
+      messageCount,
+      sortDirection: parsedExport.sortDirection,
+    },
+  }
+}
+
+async function handleGetParserPage(_event, payload = {}) {
+  const importId = payload.importId
+  const parsedExport = getCachedParse(importId)
+
+  if (!parsedExport) {
+    return {
+      ok: false,
+      warnings: [
+        `No parsed archive found for import ${importId}. Re-import the package before requesting parser pages.`,
+      ],
+      channels: [],
+      messagesByChannel: {},
+    }
+  }
+
+  if (payload.sortDirection && payload.sortDirection !== parsedExport.sortDirection) {
+    const sortedExport = {
+      ...parsedExport,
+      messagesByChannel: { ...parsedExport.messagesByChannel },
+      sortDirection: payload.sortDirection === 'desc' ? 'desc' : 'asc',
+    }
+
+    for (const [channelId, messages] of Object.entries(sortedExport.messagesByChannel)) {
+      sortedExport.messagesByChannel[channelId] = [...messages].sort((a, b) => {
+        const aEpoch = Number.isNaN(a.timestampEpochMs) ? Number.MAX_SAFE_INTEGER : a.timestampEpochMs
+        const bEpoch = Number.isNaN(b.timestampEpochMs) ? Number.MAX_SAFE_INTEGER : b.timestampEpochMs
+
+        if (aEpoch === bEpoch) {
+          return 0
+        }
+
+        if (sortedExport.sortDirection === 'desc') {
+          return aEpoch < bEpoch ? 1 : -1
+        }
+
+        return aEpoch > bEpoch ? 1 : -1
+      })
+    }
+
+    parsedArchiveCache.set(importId, sortedExport)
+  }
+
+  const currentParse = getCachedParse(importId)
+
+  return {
+    ok: true,
+    importId,
+    sortDirection: currentParse.sortDirection,
+    ...getPaginatedParserOutput(currentParse, payload),
   }
 }
 
 app.whenReady().then(() => {
   ipcMain.handle('dialog:pick-data-package', handleSelectZip)
   ipcMain.handle('dialog:select-zip', handleSelectZip)
+  ipcMain.handle('parser:get-page', handleGetParserPage)
 
   createWindow()
 
