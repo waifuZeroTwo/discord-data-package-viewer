@@ -87,6 +87,28 @@
         </section>
 
         <section class="card">
+          <h2 class="card-title">Billing & Nitro</h2>
+          <div id="billingSummaryCards" class="billing-summary-grid"></div>
+          <div class="billing-controls">
+            <div>
+              <label for="billingTypeFilter">Transaction type</label>
+              <select id="billingTypeFilter">
+                <option value="">All types</option>
+              </select>
+            </div>
+            <div>
+              <label for="billingStatusFilter">Status</label>
+              <select id="billingStatusFilter">
+                <option value="">All statuses</option>
+              </select>
+            </div>
+          </div>
+          <div id="billingTransactionsPanel" class="billing-table-wrap"></div>
+          <h3 class="card-title">Gifted Nitro Received</h3>
+          <div id="giftedNitroPanel" class="billing-gift-list"></div>
+        </section>
+
+        <section class="card">
           <div class="card-header-row">
             <h2 class="card-title">Premium History</h2>
             <div class="segmented-toggle" role="group" aria-label="Premium history view mode">
@@ -119,6 +141,11 @@
       const favoriteEmojisPanelEl = document.getElementById('favoriteEmojisPanel')
       const premiumModeTextEl = document.getElementById('premiumModeText')
       const premiumModeGraphEl = document.getElementById('premiumModeGraph')
+      const billingSummaryCardsEl = document.getElementById('billingSummaryCards')
+      const billingTransactionsPanelEl = document.getElementById('billingTransactionsPanel')
+      const giftedNitroPanelEl = document.getElementById('giftedNitroPanel')
+      const billingTypeFilterEl = document.getElementById('billingTypeFilter')
+      const billingStatusFilterEl = document.getElementById('billingStatusFilter')
 
       const versions = window.ddpApi.getRuntimeVersions()
       versionsEl.textContent = `Electron ${versions.electron} • Chrome ${versions.chrome}`
@@ -137,6 +164,17 @@
         connections: [],
         recentEmojis: [],
         favoriteEmojis: [],
+        billingTransactions: [],
+        giftedNitro: [],
+        billingSummary: {
+          transactionCount: 0,
+          totalSpentGross: 0,
+          totalSpentNet: 0,
+          refundTotal: 0,
+          giftedNitroCount: 0,
+          giftedNitroValueReceived: 0,
+          summaryCurrency: null,
+        },
         premiumHistoryMode: localStorage.getItem(PREMIUM_HISTORY_MODE_KEY) === 'graph' ? 'graph' : 'text',
       }
 
@@ -231,6 +269,31 @@
         }
 
         return timestampFormatter.format(new Date(epoch))
+      }
+
+      function formatCurrencyAmount(amount, currency) {
+        const numericAmount = Number(amount)
+        if (!Number.isFinite(numericAmount)) {
+          return 'Unknown amount'
+        }
+
+        const normalizedCurrency =
+          typeof currency === 'string' && currency.trim() ? currency.trim().toUpperCase() : null
+        if (!normalizedCurrency) {
+          return `${numericAmount.toFixed(2)} (unknown currency)`
+        }
+
+        try {
+          return new Intl.NumberFormat(undefined, {
+            style: 'currency',
+            currency: normalizedCurrency,
+            currencyDisplay: 'symbol',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }).format(numericAmount)
+        } catch {
+          return `${numericAmount.toFixed(2)} ${normalizedCurrency}`
+        }
       }
 
       function formatDuration(startAt, endAt) {
@@ -541,6 +604,139 @@
         }
       }
 
+      function getFilteredBillingTransactions() {
+        const typeFilter = billingTypeFilterEl.value
+        const statusFilter = billingStatusFilterEl.value
+
+        return state.billingTransactions.filter((transaction) => {
+          const typeMatches = !typeFilter || transaction.type === typeFilter
+          const statusMatches = !statusFilter || transaction.status === statusFilter
+          return typeMatches && statusMatches
+        })
+      }
+
+      function syncBillingFilterOptions() {
+        const selectedType = billingTypeFilterEl.value
+        const selectedStatus = billingStatusFilterEl.value
+        const types = Array.from(new Set(state.billingTransactions.map((item) => item.type).filter(Boolean))).sort()
+        const statuses = Array.from(
+          new Set(state.billingTransactions.map((item) => item.status).filter(Boolean)),
+        ).sort()
+
+        billingTypeFilterEl.innerHTML = '<option value="">All types</option>'
+        for (const type of types) {
+          billingTypeFilterEl.innerHTML += `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`
+        }
+
+        billingStatusFilterEl.innerHTML = '<option value="">All statuses</option>'
+        for (const status of statuses) {
+          billingStatusFilterEl.innerHTML += `<option value="${escapeHtml(status)}">${escapeHtml(status)}</option>`
+        }
+
+        if (types.includes(selectedType)) {
+          billingTypeFilterEl.value = selectedType
+        }
+        if (statuses.includes(selectedStatus)) {
+          billingStatusFilterEl.value = selectedStatus
+        }
+      }
+
+      function renderBilling() {
+        if (!state.latestImportId || !state.importMeta?.ok) {
+          billingSummaryCardsEl.innerHTML = '<div class="muted small">Import a package to view billing insights.</div>'
+          billingTransactionsPanelEl.innerHTML = ''
+          giftedNitroPanelEl.innerHTML = ''
+          return
+        }
+
+        const summary = state.billingSummary || {}
+        const summaryCurrency = summary.summaryCurrency || null
+        billingSummaryCardsEl.innerHTML = `
+          <div class="summary-card">
+            <div class="muted small">Total spent (gross)</div>
+            <div class="summary-value">${escapeHtml(formatCurrencyAmount(summary.totalSpentGross, summaryCurrency))}</div>
+          </div>
+          <div class="summary-card">
+            <div class="muted small">Total spent (net)</div>
+            <div class="summary-value">${escapeHtml(formatCurrencyAmount(summary.totalSpentNet, summaryCurrency))}</div>
+          </div>
+          <div class="summary-card">
+            <div class="muted small">Refund total</div>
+            <div class="summary-value">${escapeHtml(formatCurrencyAmount(summary.refundTotal, summaryCurrency))}</div>
+          </div>
+          <div class="summary-card">
+            <div class="muted small">Transactions</div>
+            <div class="summary-value">${escapeHtml(String(summary.transactionCount || 0))}</div>
+          </div>
+          <div class="summary-card">
+            <div class="muted small">Gifted Nitro received</div>
+            <div class="summary-value">${escapeHtml(String(summary.giftedNitroCount || 0))}</div>
+          </div>
+          <div class="summary-card">
+              <div class="muted small">Gifted Nitro value</div>
+              <div class="summary-value">${escapeHtml(
+              formatCurrencyAmount(summary.giftedNitroValueReceived, summaryCurrency),
+            )}</div>
+          </div>
+        `
+
+        const rows = getFilteredBillingTransactions()
+        if (!rows.length) {
+          billingTransactionsPanelEl.innerHTML =
+            '<div class="muted small">No billing transactions found (or none match the active filters).</div>'
+        } else {
+          billingTransactionsPanelEl.innerHTML = `
+            <table class="billing-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Amount</th>
+                  <th>Currency</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Description</th>
+                  <th>Related Subscription</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows
+                  .map((entry) => {
+                    const amountLabel = formatCurrencyAmount(entry.amount, entry.currency)
+                    const currencyLabel = entry.currency || 'Unknown'
+                    return `<tr>
+                        <td>${escapeHtml(formatTimestampForDisplay(entry.date))}</td>
+                        <td>${escapeHtml(amountLabel)}</td>
+                        <td>${escapeHtml(currencyLabel)}</td>
+                        <td>${escapeHtml(entry.type || 'unknown')}</td>
+                        <td>${escapeHtml(entry.status || 'unknown')}</td>
+                        <td>${escapeHtml(entry.description || 'Billing transaction')}</td>
+                        <td>${escapeHtml(entry.relatedSubscriptionId || '—')}</td>
+                      </tr>`
+                  })
+                  .join('')}
+              </tbody>
+            </table>
+          `
+        }
+
+        if (!state.giftedNitro.length) {
+          giftedNitroPanelEl.innerHTML = '<div class="muted small">No gifted Nitro redemptions found.</div>'
+        } else {
+          giftedNitroPanelEl.innerHTML = `<ul>${state.giftedNitro
+            .map((gift) => {
+              const date = formatTimestampForDisplay(gift.date)
+              const amount = formatCurrencyAmount(gift.amount, gift.currency)
+              return `<li>
+                  <div>${escapeHtml(date)} • ${escapeHtml(gift.description || 'Gifted Nitro redemption')}</div>
+                  <div class="muted small">Value: ${escapeHtml(amount)} • Subscription: ${escapeHtml(
+                gift.relatedSubscriptionId || 'unknown',
+              )}</div>
+                </li>`
+            })
+            .join('')}</ul>`
+        }
+      }
+
       function renderTimeline() {
         if (!state.latestImportId) {
           timelineTitleEl.textContent = 'Message Timeline'
@@ -617,6 +813,7 @@
         renderBadges()
         renderConnections()
         renderEmojiPanels()
+        renderBilling()
         renderPremiumHistory()
 
         if (state.importMeta?.warnings?.length) {
@@ -662,6 +859,17 @@
           state.connections = []
           state.recentEmojis = []
           state.favoriteEmojis = []
+          state.billingTransactions = []
+          state.giftedNitro = []
+          state.billingSummary = {
+            transactionCount: 0,
+            totalSpentGross: 0,
+            totalSpentNet: 0,
+            refundTotal: 0,
+            giftedNitroCount: 0,
+            giftedNitroValueReceived: 0,
+            summaryCurrency: null,
+          }
           setStatus('error', 'Error')
           render()
           return
@@ -674,11 +882,15 @@
         state.connections = parserPage.connections || []
         state.recentEmojis = parserPage.recentEmojis || []
         state.favoriteEmojis = parserPage.favoriteEmojis || []
+        state.billingTransactions = parserPage.billingTransactions || []
+        state.giftedNitro = parserPage.giftedNitro || []
+        state.billingSummary = parserPage.billingSummary || state.billingSummary
         if (!state.selectedChannelId && state.channels.length > 0) {
           state.selectedChannelId = state.channels[0].id
         }
 
         syncFilterChannelOptions()
+        syncBillingFilterOptions()
         setStatus('ready', 'Ready')
         render()
       }
@@ -688,6 +900,11 @@
       for (const element of [filterTextEl, filterChannelEl, dateFromEl, dateToEl]) {
         element.addEventListener('input', render)
         element.addEventListener('change', render)
+      }
+
+      for (const element of [billingTypeFilterEl, billingStatusFilterEl]) {
+        element.addEventListener('input', renderBilling)
+        element.addEventListener('change', renderBilling)
       }
 
       premiumModeTextEl.addEventListener('click', () => {
