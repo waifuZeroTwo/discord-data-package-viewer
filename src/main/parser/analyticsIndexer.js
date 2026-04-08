@@ -1,6 +1,43 @@
 const OLDEST_MESSAGE_LIMIT = 1000
 const TOP_METRIC_LIMIT = 25
 
+function normalizeContentForCharacterCount(content) {
+  if (typeof content !== 'string') {
+    return ''
+  }
+
+  return content.normalize('NFC').replace(/\r\n?/g, '\n').replace(/\u00A0/g, ' ')
+}
+
+function inferAttachmentExtension(attachment) {
+  const filename =
+    typeof attachment?.filename === 'string' && attachment.filename.trim() ? attachment.filename.trim() : null
+  if (filename) {
+    const lastSegment = filename.split('.').pop()
+    if (lastSegment && lastSegment !== filename) {
+      return lastSegment.toLowerCase()
+    }
+  }
+
+  const url = typeof attachment?.url === 'string' && attachment.url.trim() ? attachment.url.trim() : null
+  if (!url) {
+    return null
+  }
+
+  const withoutQuery = url.split('?')[0]
+  const lastPathSegment = withoutQuery.split('/').pop()
+  if (!lastPathSegment) {
+    return null
+  }
+
+  const fromUrl = lastPathSegment.split('.').pop()
+  if (!fromUrl || fromUrl === lastPathSegment) {
+    return null
+  }
+
+  return fromUrl.toLowerCase()
+}
+
 function getIsoWeekKey(epochMs) {
   const date = new Date(epochMs)
   const utcDate = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
@@ -61,6 +98,10 @@ function createAnalyticsIndexer() {
     mentionCount: 0,
     attachmentCount: 0,
     attachmentBytes: 0,
+    attachmentSizeUnavailableCount: 0,
+    attachmentTypeUnavailableCount: 0,
+    mentionsFromArrayCount: 0,
+    mentionsFromTokenCount: 0,
   }
 
   const counters = {
@@ -74,6 +115,7 @@ function createAnalyticsIndexer() {
     activeWeeks: new Map(),
     activeMonths: new Map(),
     activeYears: new Map(),
+    attachmentTypes: new Map(),
   }
 
   const oldestMessages = []
@@ -106,16 +148,17 @@ function createAnalyticsIndexer() {
     ingestMessage(message) {
       metrics.messageCount += 1
 
-      const content = typeof message.content === 'string' ? message.content : ''
+      const content = normalizeContentForCharacterCount(message.content)
       const characterCount = content.length
-      metrics.characterCount += content.length
+      metrics.characterCount += characterCount
 
-      const directMentionMatches = content.match(/<@!?(\d+)>/g)
-      metrics.mentionCount += Array.isArray(message.mentions)
-        ? message.mentions.length
-        : directMentionMatches
-          ? directMentionMatches.length
-          : 0
+      const arrayMentions = Array.isArray(message.mentions) ? message.mentions.length : 0
+      const tokenMentions = content.match(/<@!?\d+>|<@&\d+>|<#\d+>|@everyone|@here/g)?.length || 0
+      const mentionCount = Math.max(arrayMentions, tokenMentions)
+
+      metrics.mentionCount += mentionCount
+      metrics.mentionsFromArrayCount += arrayMentions
+      metrics.mentionsFromTokenCount += tokenMentions
 
       if (Array.isArray(message.attachments)) {
         metrics.attachmentCount += message.attachments.length
@@ -123,6 +166,15 @@ function createAnalyticsIndexer() {
           const size = Number(attachment?.size)
           if (Number.isFinite(size)) {
             metrics.attachmentBytes += size
+          } else {
+            metrics.attachmentSizeUnavailableCount += 1
+          }
+
+          const extension = inferAttachmentExtension(attachment)
+          if (extension) {
+            bumpMetric(counters.attachmentTypes, extension, extension)
+          } else {
+            metrics.attachmentTypeUnavailableCount += 1
           }
         }
       }
@@ -242,10 +294,32 @@ function createAnalyticsIndexer() {
           key: 'attachments',
           count: metrics.attachmentCount,
           totalBytes: metrics.attachmentBytes,
+          topFileTypes: toTopList(counters.attachmentTypes, 10),
+          sizeUnavailableCount: metrics.attachmentSizeUnavailableCount,
+          typeUnavailableCount: metrics.attachmentTypeUnavailableCount,
         },
         mentions: {
           key: 'mentions',
           count: metrics.mentionCount,
+          fromMentionArrays: metrics.mentionsFromArrayCount,
+          fromMentionTokens: metrics.mentionsFromTokenCount,
+        },
+        dataAvailabilityNotes: [
+          metrics.attachmentSizeUnavailableCount > 0
+            ? `${metrics.attachmentSizeUnavailableCount} attachments were missing a size field.`
+            : null,
+          metrics.attachmentTypeUnavailableCount > 0
+            ? `${metrics.attachmentTypeUnavailableCount} attachments were missing a filename/extension.`
+            : null,
+          metrics.mentionsFromArrayCount === 0 && metrics.mentionsFromTokenCount > 0
+            ? 'Mention arrays were unavailable in message records, so mention tokens from message content were used.'
+            : null,
+          metrics.mentionsFromArrayCount > 0 && metrics.mentionsFromTokenCount > 0
+            ? 'Mentions were derived from both mention arrays and content tokens (deduplicated per message via max count).'
+            : null,
+        ].filter(Boolean),
+        characterNormalization: {
+          strategy: 'NFC unicode + CRLF→LF + NBSP→space',
         },
       }
     },
