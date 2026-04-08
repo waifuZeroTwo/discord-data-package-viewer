@@ -175,6 +175,9 @@ function emitParserProgress(event, meta, payload) {
   }
   event.sender.send('parser:progress', {
     importId: meta.importId,
+    jobToken: meta.jobToken,
+    activeImportId: activeImportRequest,
+    jobStatus: 'running',
     importHash: meta.importHash,
     progress: normalizeProgressPayload(payload),
   })
@@ -192,6 +195,7 @@ function createImportRuntime(importId, importHash, options = {}) {
 
   return {
     importId,
+    jobToken: options.jobToken || null,
     importHash,
     importSourceType: options.importSourceType || 'zip',
     selectedSourcePath: options.selectedSourcePath || null,
@@ -282,6 +286,9 @@ function startRuntimeMonitor(event, runtime) {
 
     emitImportStatus(event, {
       importId: runtime.importId,
+      activeImportId: activeImportRequest,
+      jobToken: runtime.jobToken,
+      jobStatus: 'running',
       state: IMPORT_STATES.STALLED,
       message: `Import appears stalled during ${phase} after ${Math.round(elapsedMs / 1000)}s.`,
       stall: diagnostic,
@@ -368,6 +375,7 @@ async function extractZipWithProgress(zipPath, outputDir, onProgress) {
 
 async function handleSelectZip(event, payload = {}) {
   const importId = payload.importId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const jobToken = crypto.randomUUID()
   const requestedImportSourceType = payload.importSourceType === 'folder' ? 'folder' : 'zip'
   console.debug('[ddp][main] dialog:select-zip invoke:start', {
     importId,
@@ -378,12 +386,16 @@ async function handleSelectZip(event, payload = {}) {
   if (activeImportRequest && activeImportRequest !== importId) {
     emitImportStatus(event, {
       importId,
+      activeImportId: activeImportRequest,
+      jobToken,
+      jobStatus: 'failed',
       state: IMPORT_STATES.FAILED,
       message: `Another import (${activeImportRequest}) is already running.`,
     })
     const busyResponse = {
       ok: false,
       importId,
+      jobToken,
       busy: true,
       warnings: ['Another import is already in progress. Please wait for it to finish.'],
       detectedSections: [],
@@ -399,6 +411,9 @@ async function handleSelectZip(event, payload = {}) {
   activeImportRequest = importId
   emitImportStatus(event, {
     importId,
+    activeImportId: activeImportRequest,
+    jobToken,
+    jobStatus: 'running',
     state: IMPORT_STATES.SELECTING_FILE,
     message: requestedImportSourceType === 'folder' ? 'Waiting for folder selection.' : 'Waiting for ZIP file selection.',
   })
@@ -427,6 +442,9 @@ async function handleSelectZip(event, payload = {}) {
       if (canceled || filePaths.length === 0) {
         emitImportStatus(event, {
           importId,
+          activeImportId: activeImportRequest,
+          jobToken,
+          jobStatus: 'canceled',
           state: IMPORT_STATES.CANCELED,
           message:
             requestedImportSourceType === 'folder'
@@ -437,6 +455,7 @@ async function handleSelectZip(event, payload = {}) {
           ok: false,
           canceled: true,
           importId,
+          jobToken,
           importSourceType: requestedImportSourceType,
           warnings: [
             requestedImportSourceType === 'folder'
@@ -468,6 +487,7 @@ async function handleSelectZip(event, payload = {}) {
         ? await computeFolderFingerprint(selectedSourcePath)
         : await computeFileSha256(selectedSourcePath)
     const runtime = createImportRuntime(importId, importHash, {
+      jobToken,
       importSourceType: requestedImportSourceType,
       selectedSourcePath,
       selectedZipPath: requestedImportSourceType === 'zip' ? selectedSourcePath : null,
@@ -486,10 +506,13 @@ async function handleSelectZip(event, payload = {}) {
         setRuntimePhase(runtime, 'extracting')
         emitImportStatus(event, {
           importId,
+          activeImportId: activeImportRequest,
+          jobToken,
+          jobStatus: 'running',
           state: IMPORT_STATES.EXTRACTING_ZIP,
           message: `Extracting ZIP archive from ${selectedSourcePath}.`,
         })
-        emitParserProgress(event, { importId, importHash }, {
+        emitParserProgress(event, { importId, importHash, jobToken }, {
           phase: 'extracting',
           percent: 0,
           filesDone: 0,
@@ -498,7 +521,7 @@ async function handleSelectZip(event, payload = {}) {
         markRuntimeProgress(runtime)
         await extractZipWithProgress(selectedSourcePath, rootPath, (progress) => {
           markRuntimeProgress(runtime)
-          emitParserProgress(event, { importId, importHash }, progress)
+          emitParserProgress(event, { importId, importHash, jobToken }, progress)
         })
         throwIfImportCanceled(runtime)
       }
@@ -506,10 +529,13 @@ async function handleSelectZip(event, payload = {}) {
       setRuntimePhase(runtime, 'scanning')
       emitImportStatus(event, {
         importId,
+        activeImportId: activeImportRequest,
+        jobToken,
+        jobStatus: 'running',
         state: IMPORT_STATES.SCANNING_FILES,
         message: `Scanning ${getSourceTypeLabel(requestedImportSourceType)} at ${selectedSourcePath} for Discord sections.`,
       })
-      emitParserProgress(event, { importId, importHash }, {
+      emitParserProgress(event, { importId, importHash, jobToken }, {
         phase: 'scanning',
         message: `Running preflight validation for ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()}.`,
       })
@@ -525,12 +551,15 @@ async function handleSelectZip(event, payload = {}) {
         setRuntimePhase(runtime, 'aggregating')
         emitImportStatus(event, {
           importId,
+          activeImportId: activeImportRequest,
+          jobToken,
+          jobStatus: 'running',
           state: IMPORT_STATES.AGGREGATING,
           message: `Using cached analytics for ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()} import.`,
         })
         parsedExport = cachedAnalytics
         markRuntimeProgress(runtime)
-        emitParserProgress(event, { importId, importHash }, {
+        emitParserProgress(event, { importId, importHash, jobToken }, {
           phase: 'complete',
           percent: 100,
           recordsDone: parsedExport.analyticsSummary?.messageCount ?? 0,
@@ -540,6 +569,9 @@ async function handleSelectZip(event, payload = {}) {
         setRuntimePhase(runtime, 'parsing')
         emitImportStatus(event, {
           importId,
+          activeImportId: activeImportRequest,
+          jobToken,
+          jobStatus: 'running',
           state: IMPORT_STATES.PARSING,
           message: `Parsing Discord export files from ${selectedSourcePath}.`,
         })
@@ -554,7 +586,7 @@ async function handleSelectZip(event, payload = {}) {
             }
 
             markRuntimeProgress(runtime)
-            emitParserProgress(event, { importId, importHash }, {
+            emitParserProgress(event, { importId, importHash, jobToken }, {
               ...latestProgress,
               heartbeat: true,
               message: `${latestProgress.message} (still working)`,
@@ -567,13 +599,16 @@ async function handleSelectZip(event, payload = {}) {
             onProgress: (progress) => {
               latestProgress = progress
               markRuntimeProgress(runtime)
-              emitParserProgress(event, { importId, importHash }, progress)
+              emitParserProgress(event, { importId, importHash, jobToken }, progress)
             },
           })
           throwIfImportCanceled(runtime)
           setRuntimePhase(runtime, 'aggregating')
           emitImportStatus(event, {
             importId,
+            activeImportId: activeImportRequest,
+            jobToken,
+            jobStatus: 'running',
             state: IMPORT_STATES.AGGREGATING,
             message: 'Aggregating analytics output.',
           })
@@ -592,12 +627,16 @@ async function handleSelectZip(event, payload = {}) {
 
       emitImportStatus(event, {
         importId,
+        activeImportId: activeImportRequest,
+        jobToken,
+        jobStatus: 'completed',
         state: IMPORT_STATES.COMPLETED,
         message: `Import completed successfully from ${getSourceTypeLabel(requestedImportSourceType).toLowerCase()} source.`,
       })
       const successResponse = {
         ok: true,
         importId,
+        jobToken,
         importHash,
         cacheHit: Boolean(cachedAnalytics),
         rootPath: parserRootPath,
@@ -623,6 +662,9 @@ async function handleSelectZip(event, payload = {}) {
         await fs.rm(rootPath, { recursive: true, force: true })
         emitImportStatus(event, {
           importId,
+          activeImportId: activeImportRequest,
+          jobToken,
+          jobStatus: 'canceled',
           state: IMPORT_STATES.CANCELED,
           message: 'Import canceled by user.',
         })
@@ -630,6 +672,7 @@ async function handleSelectZip(event, payload = {}) {
           ok: false,
           canceled: true,
           importId,
+          jobToken,
           importHash,
           rootPath,
           importSourceType: requestedImportSourceType,
@@ -654,12 +697,16 @@ async function handleSelectZip(event, payload = {}) {
   } catch (error) {
     emitImportStatus(event, {
       importId,
+      activeImportId: activeImportRequest,
+      jobToken,
+      jobStatus: 'failed',
       state: IMPORT_STATES.FAILED,
       message: `Import failed: ${error.message}`,
     })
     const errorResponse = {
       ok: false,
       importId,
+      jobToken,
       warnings: [`Import failed: ${error.message}`],
       detectedSections: [],
       parserSummary: {
